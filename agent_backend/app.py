@@ -2,6 +2,8 @@ import sys
 from pathlib import Path
 from agent_backend.database import get_db_connection
 from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 import json
 # Add parent directory to path to import sibling modules
@@ -15,6 +17,10 @@ from agent_backend.db_operations import (
     save_bug_report,
     get_test_runs
 )
+
+class RunTestsRequest(BaseModel):
+    base_url: str = "http://127.0.0.1:8000"
+    openapi_url: Optional[str] = None
 
 app = FastAPI(
     title="AI API Testing Agent",
@@ -41,10 +47,23 @@ def health():
 
 
 @app.post("/run-tests")
-def run_tests():
+def run_tests(config: Optional[RunTestsRequest] = None):
+    base_url = (
+        config.base_url
+        if config
+        else "http://127.0.0.1:8000"
+    )
 
-    # Run all API tests
-    result = run_all_tests()
+    openapi_url = (
+        config.openapi_url
+        if config
+        else None
+    )
+
+    result = run_all_tests(
+        base_url=base_url,
+        openapi_url=openapi_url
+    )
 
     return {
         "status": "success",

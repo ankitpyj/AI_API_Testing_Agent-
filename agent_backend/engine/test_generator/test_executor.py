@@ -3,6 +3,24 @@ import os
 import json
 import requests
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+_DEBUG_DIAGNOSTICS = os.getenv("DEBUG_DIAGNOSTICS", "false").lower() in ("true", "1", "yes")
+
+
+def _debug_log(*args, **kwargs):
+    if _DEBUG_DIAGNOSTICS:
+        print("[DIAGNOSTIC]", *args, **kwargs)
+
 
 # Project paths
 
@@ -36,7 +54,8 @@ from bug_report.bug_report_generator import (
 
 from test_generator.rule_based_generator import (
     generate_all_tests,
-    get_expected_success_response
+    get_expected_success_response,
+    generate_path_params
 )
 
 from test_generator.response_validator import (
@@ -62,7 +81,8 @@ from db_operations import (
     save_bug_report
 )
 
-BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = DEFAULT_BASE_URL
 
 
 
@@ -91,7 +111,20 @@ def build_url(endpoint, path_params):
     return url
 
 
-def execute_test(test):
+def sort_tests_for_execution(tests):
+    """
+    Sort tests so destructive DELETE operations run last,
+    preventing premature deletion of data needed by preceding tests.
+    """
+    tests.sort(
+        key=lambda test: (
+            test.get("method", "").upper() == "DELETE"
+        )
+    )
+    return tests
+
+
+def execute_test(test, base_url=DEFAULT_BASE_URL):
     """
     Execute one generated test case.
     """
@@ -126,7 +159,7 @@ def execute_test(test):
         path_params
     )
 
-    full_url = BASE_URL + url
+    full_url = base_url.rstrip("/") + url
 
     print("\n" + "=" * 70)
 
@@ -138,18 +171,19 @@ def execute_test(test):
         f"Request: {method} {full_url}"
     )
 
-    # Handle Unicode characters in body for printing
+    # Display request body; fallback to ensure_ascii=True if terminal cannot encode Unicode
     if body:
         try:
-            body_str = json.dumps(body, ensure_ascii=True)
-        except:
-            body_str = repr(body)
+            body_str = json.dumps(body, ensure_ascii=False)
+            print(f"Body: {body_str}")
+        except Exception:
+            try:
+                body_str = json.dumps(body, ensure_ascii=True)
+                print(f"Body: {body_str}")
+            except Exception:
+                print("Body: <unprintable body>")
     else:
-        body_str = "None"
-    
-    print(
-        f"Body: {body_str}"
-    )
+        print("Body: None")
 
     try:
 
@@ -175,16 +209,18 @@ def execute_test(test):
             response_body = response.text
 
         try:
-            response_body_str = str(response_body).encode("ascii", errors="replace").decode("ascii")
+            response_body_str = json.dumps(response_body, ensure_ascii=False)
+            print(f"Response: {response_body_str}")
         except Exception:
-            response_body_str = repr(response_body)
+            try:
+                response_body_str = json.dumps(response_body, ensure_ascii=True)
+                print(f"Response: {response_body_str}")
+            except Exception:
+                print("Response: <unprintable response>")
 
-        print(
-            f"Response: "
-            f"{response_body_str}"
-        )
-
-        return {
+        # Carry provenance fields from the test case into the result so
+        # validate_response() can classify uncertain expectations correctly.
+        result = {
             "test_id": test["test_id"],
             "endpoint": endpoint,
             "method": method,
@@ -195,6 +231,15 @@ def execute_test(test):
                 "body": response_body
             }
         }
+        for provenance_key in (
+            "expected_source",
+            "expectation_confidence",
+            "requires_review",
+            "review_reason",
+        ):
+            if provenance_key in test:
+                result[provenance_key] = test[provenance_key]
+        return result
 
     except requests.RequestException as error:
 
@@ -202,7 +247,7 @@ def execute_test(test):
             f"Request failed: {error}"
         )
 
-        return {
+        result = {
             "test_id": test["test_id"],
             "endpoint": endpoint,
             "method": method,
@@ -214,53 +259,79 @@ def execute_test(test):
                 "error": str(error)
             }
         }
+        for provenance_key in (
+            "expected_source",
+            "expectation_confidence",
+            "requires_review",
+            "review_reason",
+        ):
+            if provenance_key in test:
+                result[provenance_key] = test[provenance_key]
+        return result
         
-def run_all_tests():
-        # Reset target API data before every test run
-    try:
-        reset_response = requests.post(
-            f"{BASE_URL}/reset"
-        )
+def run_all_tests(
+    base_url=DEFAULT_BASE_URL,
+    openapi_url=None
+    ):
+    if openapi_url is None:
+        openapi_url = base_url.rstrip("/") + "/openapi.json"
 
-        if reset_response.status_code != 200:
-            print("WARNING: Could not reset test data.")
+    # ── Step 1: Reset demo data (local API only) ────────────────────────
+    reset_ok = True
 
-    except requests.RequestException as e:
-        print(f"WARNING: Could not reset test data: {e}")
-    
-    
-    print("Generating test cases...\n")
+    if base_url.rstrip("/") == DEFAULT_BASE_URL.rstrip("/"):
+        try:
+            reset_response = requests.post(
+                f"{base_url.rstrip('/')}/reset",
+                timeout=5
+            )
 
-    all_tests = generate_all_tests()
+            if reset_response.status_code == 200:
+                print("[Reset] Test data restored successfully.")
+            else:
+                reset_ok = False
+                print(
+                    "[Reset] WARNING: /reset returned "
+                    f"{reset_response.status_code}. "
+                    "Tests that depend on user ID 1 may fail."
+                )
 
-    print(f"Rule-based tests: {len(all_tests)}")
+        except requests.RequestException as e:
+            reset_ok = False
+            print(
+                f"[Reset] WARNING: Could not reach target API: {e}. "
+                "Is the target API running on port 8000? "
+                "Tests that depend on user ID 1 may fail."
+            )
 
-    # Generate AI tests — reuse the same OpenAPI endpoint data
-    # (generate_all_tests already loaded it internally, so we load once more
-    #  here only for the AI generator; the DEBUG prints are now removed from parser)
-    openapi_data = load_openapi(
-        "http://127.0.0.1:8000/openapi.json"
-    )
-    endpoints = extract_endpoints(openapi_data)
+    # ── Step 2: Load OpenAPI spec ONCE and reuse it everywhere ──────────
+    print("\nLoading OpenAPI specification...")
+    openapi_data = load_openapi(openapi_url)
+    endpoints    = extract_endpoints(openapi_data)
+    print(f"Found {len(endpoints)} endpoints.")
 
+    # ── Step 3: Generate rule-based tests ───────────────────────────────
+    print("\nGenerating test cases...\n")
+
+    # Pass already-loaded openapi_data to avoid a second network fetch
+    all_tests = generate_all_tests(openapi_url, openapi_data=openapi_data)
+
+    print(f"Rule-based tests generated: {len(all_tests)}")
+
+    # ── Step 4: Generate AI tests ────────────────────────────────────────
     ai_tests = []
 
     for endpoint in endpoints:
 
         # Currently generate AI tests only for POST /users
-        if (
-            endpoint["path"] == "/users"
-            and endpoint["method"] == "POST"
-        ):
+        if endpoint.get("request_body"):
 
-            print("\n[DEBUG] Calling AI test generator...")
-            print(f"[DEBUG] Endpoint: {endpoint['method']} {endpoint['path']}")
+            print(f"[AI Generator] Endpoint: {endpoint['method']} {endpoint['path']}")
 
             generated_tests = generate_ai_tests(endpoint)
             
             print(
-                f"[DEBUG] AI generator returned: "
-                f"{len(generated_tests)} tests"
+                f"[AI Generator] Returned {len(generated_tests)} tests"
             )
             
             # Add expected response schema to AI tests
@@ -269,32 +340,36 @@ def run_all_tests():
                 openapi_data
             )
             print(
-                "[DEBUG] Resolved expected response schema:",
+                "[AI Generator] Expected success schema:",
                 expected_schema
             )
-            print(
-                "[DEBUG] POST /users endpoint:",
-                endpoint
-            )
-
-            print(
-                "[DEBUG] Expected schema:",
-                expected_schema
-            )
-            
-            print(
-                "[DEBUG] Expected schema for AI tests:",
-                expected_schema
-                )
             
             for test in generated_tests:
-                test["expected"]["response_schema"] = expected_schema
-                
-                print(
-                    "[DEBUG] AI TEST EXPECTED:",
-                    test["expected"]
-                    )
-            
+                test.setdefault("request", {})
+
+                path_params = test["request"].setdefault(
+                    "path_params", {}
+                )
+
+                # Populate path parameters generically from OpenAPI parameter specs
+                for param_name, param_val in generate_path_params(endpoint).items():
+                    path_params.setdefault(param_name, param_val)
+
+                # Fallback for any template parameters in path not explicitly listed
+                import re
+                for param_name in re.findall(r"\{([^}]+)\}", endpoint.get("path", "")):
+                    path_params.setdefault(param_name, 1)
+
+                # Preserve the AI-generated expected status code.
+                test.setdefault("expected", {})
+
+                # Attach the success response schema only when the
+                # expected status represents a successful response.
+                expected_status = test["expected"].get("status_code")
+
+                if expected_status is not None and 200 <= expected_status < 300:
+                    test["expected"]["response_schema"] = expected_schema
+
             ai_tests.extend(generated_tests)
 
     # Give AI tests unique IDs
@@ -305,17 +380,35 @@ def run_all_tests():
 
     # Combine rule-based + AI tests
     all_tests.extend(ai_tests)
-
-    print(
-        f"Total tests: {len(all_tests)}"
-    )
-
+    
+    # Run destructive DELETE tests last so they do not
+    # remove users needed by GET or PUT tests.
+    sort_tests_for_execution(all_tests)
+    
+    print(f"Total tests: {len(all_tests)}")
+    
     results = []
-
+    
     for test in all_tests:
+        _debug_log(
+            f"Before execution: test_id={test.get('test_id')}, "
+            f"endpoint={test.get('endpoint')}, "
+            f"expected_status_code={test.get('expected', {}).get('status_code')}, "
+            f"expected_source={test.get('expected_source')}, "
+            f"expectation_confidence={test.get('expectation_confidence')}, "
+            f"requires_review={test.get('requires_review')}"
+        )
 
-        result = execute_test(test)
-        
+        result = execute_test(test, base_url=base_url)
+
+        _debug_log(
+            f"Before validation: test_id={result.get('test_id')}, "
+            f"actual_status={result.get('actual', {}).get('status_code')}, "
+            f"expected_status_code={result.get('expected', {}).get('status_code')}, "
+            f"expected_source={result.get('expected_source')}, "
+            f"expectation_confidence={result.get('expectation_confidence')}, "
+            f"requires_review={result.get('requires_review')}"
+        )
 
         validated_result = validate_response(
             result)
@@ -353,18 +446,30 @@ def run_all_tests():
                 f"{result['failure_reason']}"
             )
 
+            # UNCERTAIN_EXPECTATION: the AI guessed the expected outcome and
+            # the API disagreed.  This is NOT a confirmed API defect — do not
+            # generate a bug report or run AI analysis for it.
+            if result.get("failure_type") == "UNCERTAIN_EXPECTATION":
+                print(
+                    "[Validator] UNCERTAIN_EXPECTATION — skipping bug report "
+                    "(AI expectation was low-confidence or flagged for review)."
+                )
+                result["ai_analysis"] = None
+                result["bug_report"] = None
+                continue
+
             # Analyze failed test using AI
             analysis = analyze_failure(
                 result
             )
 
             result["ai_analysis"] = analysis
-            
+
             bug_counter += 1
             bug_report = generate_bug_report(result, bug_counter=bug_counter)
 
             result["bug_report"] = bug_report
-            
+
             print("\nBUG REPORT")
             print("-" * 50)
 
@@ -435,17 +540,11 @@ def run_all_tests():
     
     # Save every test result
     for result in results:
-        
-        if result.get("test_id") == "TC-005":
-            print("\n========== DEBUG DB RESULT ==========")
-            print(json.dumps(result, indent=2, default=str))
-            print("=====================================\n")
-    
         save_test_result(
             run_id,
             result
         )
-    
+
         if result.get("bug_report"):
             save_bug_report(
                 run_id,

@@ -1,3 +1,8 @@
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from parser.openapi_parser import (
     load_openapi,
     extract_endpoints

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from typing import List
-
+from typing import Literal
 
 app = FastAPI(
     title="Target User API",
@@ -17,13 +17,13 @@ app = FastAPI(
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
-    age: int
+    age: int = Field(ge=0, le=120)
 
 
 class UserUpdate(BaseModel):
     name: str | None = None
     email: EmailStr | None = None
-    age: int | None = None
+    age: int | None = Field(default=None, ge=0, le=120)
 
 
 class LoginRequest(BaseModel):
@@ -31,10 +31,7 @@ class LoginRequest(BaseModel):
     password: str
     
 class HealthResponse(BaseModel):
-    status: str = Field(
-        ...,
-        example="ok"
-    )
+    status: Literal["ok"]
 
 
 class UserResponse(BaseModel):
@@ -114,7 +111,7 @@ def root():
     response_model=HealthResponse
 )
 def health():
-    return {"status": "error"}
+    return {"status": "ok"}
 
 
 # -----------------------------
