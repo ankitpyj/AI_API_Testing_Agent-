@@ -36,6 +36,30 @@ def get_expected_success_status(endpoint):
 
     return 200
 
+
+def get_expected_validation_error_status(endpoint):
+    """
+    Find the expected client error status code from the endpoint's documented responses.
+    Checks for 422 (Unprocessable Entity) or 400 (Bad Request).
+    Defaults to 422 if neither is explicitly documented (FastAPI standard).
+    """
+    documented_codes = []
+    for resp in endpoint.get("responses", []):
+        code_str = str(resp.get("status_code", ""))
+        if code_str.isdigit():
+            documented_codes.append(int(code_str))
+
+    for preferred in (422, 400):
+        if preferred in documented_codes:
+            return preferred
+
+    for code in documented_codes:
+        if 400 <= code < 500:
+            return code
+
+    return 422
+
+
 def generate_valid_value(field):
     """
     Generate a valid value based on field type/format.
@@ -65,13 +89,14 @@ def generate_valid_value(field):
 def generate_valid_path_value(field):
     """
     Generate a valid value for a path parameter.
+    Prefers documented example/default, then generates based on type without hardcoding user_id.
     """
+    if field.get("example") is not None:
+        return field["example"]
+    if field.get("default") is not None:
+        return field["default"]
 
-    field_name = field.get("name")
     field_type = field.get("type")
-
-    if field_name == "user_id":
-        return 1
 
     if field_type == "integer":
         return 1
@@ -80,9 +105,12 @@ def generate_valid_path_value(field):
         return 1.0
 
     if field_type == "string":
+        if field.get("format") == "uuid":
+            return "11111111-1111-1111-1111-111111111111"
         return "1"
 
-    return generate_valid_value(field)
+    val = generate_valid_value(field)
+    return val if val is not None else 1
 
 
 def generate_wrong_type(field):
@@ -283,6 +311,13 @@ def generate_tests_for_endpoint(endpoint,openapi_data):
 
     fields = endpoint["request_body"]["fields"]
 
+    expected_error_status = get_expected_validation_error_status(endpoint)
+    expected_error_schema = get_expected_response_for_status(
+        endpoint,
+        openapi_data,
+        expected_error_status
+    )
+
     # ---------------------------------------
     # 1. Valid Test
     # ---------------------------------------
@@ -348,12 +383,8 @@ def generate_tests_for_endpoint(endpoint,openapi_data):
                 body
             ),
             "expected": {
-                "status_code": 422,
-                "response_schema": get_expected_response_for_status(
-                endpoint,
-                openapi_data,
-                422
-                )
+                "status_code": expected_error_status,
+                "response_schema": expected_error_schema
             }
             
         })
@@ -397,12 +428,8 @@ def generate_tests_for_endpoint(endpoint,openapi_data):
                 body
             ),
             "expected": {
-                "status_code": 422,
-                "response_schema": get_expected_response_for_status(
-                endpoint,
-                openapi_data,
-                422
-                )
+                "status_code": expected_error_status,
+                "response_schema": expected_error_schema
             }
         })
 
@@ -443,12 +470,8 @@ def generate_tests_for_endpoint(endpoint,openapi_data):
                 body
             ),
             "expected": {
-                "status_code": 422,
-                "response_schema": get_expected_response_for_status(
-                endpoint,
-                openapi_data,
-                422
-                )
+                "status_code": expected_error_status,
+                "response_schema": expected_error_schema
             }
         })
 
@@ -491,12 +514,8 @@ def generate_tests_for_endpoint(endpoint,openapi_data):
                 body
             ),
             "expected": {
-                "status_code": 422,
-                "response_schema": get_expected_response_for_status(
-                endpoint,
-                openapi_data,
-                422
-                )
+                "status_code": expected_error_status,
+                "response_schema": expected_error_schema
             }
         })
 
@@ -583,15 +602,19 @@ def main():
         )
 
 
-def generate_all_tests():
+def generate_all_tests(openapi_url=OPENAPI_URL, openapi_data=None):
     """
     Load the OpenAPI specification
     and generate all test cases.
+
+    Pass openapi_data directly to skip the network fetch
+    (useful when the caller already loaded it).
     """
 
-    openapi_data = load_openapi(
-        OPENAPI_URL
-    )
+    if openapi_data is None:
+        openapi_data = load_openapi(
+            openapi_url
+        )
 
     endpoints = extract_endpoints(
         openapi_data

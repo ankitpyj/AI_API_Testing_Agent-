@@ -1,19 +1,36 @@
-# Environment variables
+# Environment variables and secrets
 .env
+.env.*
 *.env
+!.env.example
+!.env.template
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Node.js / frontend
+node_modules/
+dashboard/dist/
+dashboard/.vite/
 
 # IDE
 .vscode/
 .idea/
 
-# Testing
-.pytest_cache/
-
-# Logs
+# Logs and temporary files
 *.log
+*.bak
+
+# Local debug output
+openapi_debug.json
+
+# Backup files
+*.bak
+*backup*

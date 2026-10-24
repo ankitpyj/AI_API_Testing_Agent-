@@ -85,7 +85,16 @@ function DonutChart({ passed, failed, total }) {
 /* ══════════════════════════════════════════════════════
    PAGE: DASHBOARD (Overview)
 ══════════════════════════════════════════════════════ */
-function DashboardPage({ testData, onRunTests, loading, onNavigate }) {
+function DashboardPage({
+  testData,
+  onRunTests,
+  loading,
+  onNavigate,
+  baseUrl,
+  setBaseUrl,
+  openapiUrl,
+  setOpenapiUrl,
+}){
   const total    = testData?.total    ?? 0;
   const passed   = testData?.passed   ?? 0;
   const failed   = testData?.failed   ?? 0;
@@ -113,6 +122,11 @@ function DashboardPage({ testData, onRunTests, loading, onNavigate }) {
           {loading ? <><div className="spinner"/>Running…</> : <>▶ Run Tests</>}
         </button>
       </div>
+
+      {/* Target API Configuration */} 
+      <div className="stat-card" style={{ marginBottom: 24, padding: 24 }}> <h3 style={{ marginTop: 0 }}>Target API Configuration</h3> <p className="page-sub"> Enter the API you want the agent to test. </p> <div style={{ display: "grid", gap: 16, gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", marginTop: 20, }}> <label style={{ display: "grid", gap: 8 }}> <span>Target Base URL</span> <input type="url" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.example.com" style={{ width: "100%", padding: 12, borderRadius: 8 }} /> </label> <label style={{ display: "grid", gap: 8 }}> <span>OpenAPI Specification URL</span> <input type="url" value={openapiUrl} onChange={e => setOpenapiUrl(e.target.value)} placeholder="https://api.example.com/openapi.json" style={{ width: "100%", padding: 12, borderRadius: 8 }} /> </label> </div> <p className="page-sub" style={{ marginTop: 12 }}> For your current demo, keep the default URLs. The API specification must describe the target API you are testing. </p> </div> {/* Stat cards */} <div className="stats-grid"></div>
+
+
 
       {/* Stat cards */}
       <div className="stats-grid">
@@ -640,22 +654,45 @@ export default function App() {
   const [error, setError]         = useState("");
   const [testRuns, setTestRuns]   = useState([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8000");
+  const [openapiUrl, setOpenapiUrl] = useState(
+    "http://127.0.0.1:8000/openapi.json"
+  );
+
 
   const runTests = useCallback(async () => {
     setLoading(true);
     setError("");
+
     try {
-      const res  = await fetch("http://127.0.0.1:5000/run-tests", { method: "POST" });
-      if (!res.ok) throw new Error();
+      const res = await fetch("http://127.0.0.1:5000/run-tests", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          base_url: baseUrl.trim(),
+          openapi_url: openapiUrl.trim(),
+        }),
+      });
+
+      if (!res.ok) {
+        const message = await res.text();
+        throw new Error(message || "Test execution failed.");
+      }
+
       const data = await res.json();
       setTestData(data.data);
       setPage("results");
-    } catch {
-      setError("Cannot reach backend. Ensure both servers are running.");
+    } catch (err) {
+      setError(
+        err.message || "Cannot reach backend. Ensure both servers are running."
+      );
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [baseUrl, openapiUrl]);
+
 
   const loadHistory = useCallback(async () => {
     try {
@@ -800,7 +837,16 @@ export default function App() {
 
         {/* Pages */}
         {page === "dashboard" && (
-          <DashboardPage testData={testData} onRunTests={runTests} loading={loading} onNavigate={setPage}/>
+        <DashboardPage
+          testData={testData}
+          onRunTests={runTests}
+          loading={loading}
+          onNavigate={setPage}
+          baseUrl={baseUrl}
+          setBaseUrl={setBaseUrl}
+          openapiUrl={openapiUrl}            
+          setOpenapiUrl={setOpenapiUrl}
+          />
         )}
         {page === "results" && (
           <ResultsPage testData={testData}/>
