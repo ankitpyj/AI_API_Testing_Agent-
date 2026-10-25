@@ -9,11 +9,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# Create NVIDIA client
+# # Create NVIDIA client
+# client = OpenAI(
+#     api_key=os.getenv("NVIDIA_API_KEY"),
+#     base_url="https://integrate.api.nvidia.com/v1"
+# )
+# Gemini client
 client = OpenAI(
-    api_key=os.getenv("NVIDIA_API_KEY"),
-    base_url="https://integrate.api.nvidia.com/v1"
+    api_key=os.getenv("GEMINI_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    timeout=60.0,
+    max_retries=0
 )
+
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 
 def analyze_failure(result):
