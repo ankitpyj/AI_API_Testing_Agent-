@@ -644,6 +644,10 @@ function HistoryPage({ testRuns, onLoadRun }) {
   );
 }
 
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000"
+).replace(/\/+$/, "");
+
 /* ══════════════════════════════════════════════════════
    ROOT APP
 ══════════════════════════════════════════════════════ */
@@ -665,7 +669,7 @@ export default function App() {
     setError("");
 
     try {
-      const res = await fetch("http://127.0.0.1:5000/run-tests", {
+      const res = await fetch(`${API_BASE_URL}/run-tests`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
