@@ -34,3 +34,5 @@ openapi_debug.json
 # Backup files
 *.bak
 *backup*
+# Deployment certificates
+agent_backend/ca.pem
