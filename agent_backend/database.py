@@ -20,6 +20,12 @@ def get_db_connection():
         )
 
     return mysql.connector.connect(
+        ssl_ca=os.getenv(
+            "DB_SSL_CA",
+            str(Path(__file__).parent / "ca.pem")
+            ),
+        ssl_verify_cert=True,
+        ssl_verify_identity=True,
         host=os.environ["DB_HOST"],
         port=int(os.getenv("DB_PORT", "3306")),
         user=os.environ["DB_USER"],
