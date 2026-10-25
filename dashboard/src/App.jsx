@@ -700,7 +700,7 @@ export default function App() {
 
   const loadHistory = useCallback(async () => {
     try {
-      const res  = await fetch("http://127.0.0.1:5000/test-runs");
+      const res  = await fetch(`${API_BASE_URL}/test-runs`);
       if (!res.ok) throw new Error();
       const data = await res.json();
       setTestRuns(data.data);
@@ -713,8 +713,8 @@ export default function App() {
   const loadRunResults = useCallback(async (runId) => {
     try {
       const [resR, resB] = await Promise.all([
-        fetch(`http://127.0.0.1:5000/test-runs/${runId}/results`),
-        fetch(`http://127.0.0.1:5000/test-runs/${runId}/bugs`),
+        fetch(`${API_BASE_URL}/test-runs/${runId}/results`),
+        fetch(`${API_BASE_URL}/test-runs/${runId}/bugs`),
       ]);
       const [rData, bData] = await Promise.all([resR.json(), resB.json()]);
       const merged = rData.data.map(test => {
