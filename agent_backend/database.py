@@ -1,18 +1,29 @@
+
 import os
-import mysql.connector
-from dotenv import load_dotenv
 from pathlib import Path
 
-# Load .env from agent_backend directory
+import mysql.connector
+from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).parent / ".env")
 
 
 def get_db_connection():
-    connection = mysql.connector.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        user=os.getenv("DB_USER", "root"),
-        password=os.getenv("DB_PASSWORD", "ankit"),
-        database=os.getenv("DB_NAME", "ai_api_testing")
-    )
+    required_vars = ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME"]
 
-    return connection
+    missing = [name for name in required_vars if not os.getenv(name)]
+
+    if missing:
+        raise RuntimeError(
+            "Missing database environment variables: "
+            + ", ".join(missing)
+        )
+
+    return mysql.connector.connect(
+        host=os.environ["DB_HOST"],
+        port=int(os.getenv("DB_PORT", "3306")),
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        database=os.environ["DB_NAME"],
+        connection_timeout=10
+    )

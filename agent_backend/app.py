@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 from agent_backend.database import get_db_connection
 from fastapi import FastAPI
@@ -29,12 +30,19 @@ app = FastAPI(
 )
 
 
+
+
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "http://localhost:5173"
+).rstrip("/")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_origins=[FRONTEND_URL],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"]
 )
 
 
