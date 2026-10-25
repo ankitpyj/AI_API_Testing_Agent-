@@ -104,6 +104,7 @@ def get_test_results(run_id: int):
             endpoint,
             category,
             status,
+            failure_type,
             expected_status,
             expected_body,
             actual_status,

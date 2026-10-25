@@ -101,6 +101,7 @@ def save_test_result(run_id, result):
             endpoint,
             category,
             status,
+            failure_type,
             expected_status,
             expected_body,
             actual_status,
@@ -108,7 +109,7 @@ def save_test_result(run_id, result):
             actual_body,
             failure_reason
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     cursor.execute(
@@ -120,6 +121,7 @@ def save_test_result(run_id, result):
             result.get("endpoint"),
             category,
             result.get("status"),
+            result.get("failure_type"),
             expected_status,
             json.dumps(expected_body),
             actual_status,

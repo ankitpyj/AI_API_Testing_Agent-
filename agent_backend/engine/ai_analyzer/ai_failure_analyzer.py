@@ -77,7 +77,7 @@ Keep each JSON value short.
 
         response = client.chat.completions.create(
 
-            model="openai/gpt-oss-20b",
+            model=GEMINI_MODEL,
 
             messages=[
                 {
@@ -124,7 +124,7 @@ Keep each JSON value short.
         except json.JSONDecodeError:
 
             print(
-                "[AI Analyzer] Invalid JSON received from NVIDIA."
+                "[AI Analyzer] Invalid JSON received from Gemini."
             )
 
             print(
@@ -134,8 +134,9 @@ Keep each JSON value short.
             print(response_text)
 
 
-            # Safe fallback
+            # Safe fallback — mark analyzer_failed so callers can skip bug report
             return {
+                "analyzer_failed": True,
                 "summary": (
                     "The API test failed, but the AI analyzer "
                     "returned an invalid response."
@@ -161,8 +162,12 @@ Keep each JSON value short.
         )
 
 
-        # Prevent the complete test pipeline from crashing
+        # Prevent the complete test pipeline from crashing.
+        # analyzer_failed=True signals that the PASS/FAIL outcome of the test
+        # is still valid, but AI analysis was unavailable — do NOT generate a
+        # bug report purely because the analyzer failed.
         return {
+            "analyzer_failed": True,
             "summary": (
                 "The API test failed and AI analysis "
                 "could not be completed."
