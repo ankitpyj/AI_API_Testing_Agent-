@@ -1,7 +1,10 @@
 import sys
 import os
 import json
+import ipaddress
+import socket
 import requests
+from urllib.parse import urlparse
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
@@ -84,6 +87,58 @@ from db_operations import (
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 BASE_URL = DEFAULT_BASE_URL
 
+# Private / link-local / loopback IP ranges that must not be reachable
+_BLOCKED_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),      # loopback
+    ipaddress.ip_network("10.0.0.0/8"),        # private class A
+    ipaddress.ip_network("172.16.0.0/12"),     # private class B
+    ipaddress.ip_network("192.168.0.0/16"),    # private class C
+    ipaddress.ip_network("169.254.0.0/16"),    # link-local (metadata)
+    ipaddress.ip_network("::1/128"),           # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),          # IPv6 private
+    ipaddress.ip_network("fe80::/10"),         # IPv6 link-local
+]
+
+# Callers running against a deliberate local API (tunnels, local dev) can set
+# ALLOW_LOCAL_TARGETS=true to bypass the SSRF check.
+_ALLOW_LOCAL = os.getenv("ALLOW_LOCAL_TARGETS", "false").lower() in ("true", "1", "yes")
+
+
+def _validate_target_url(url: str) -> None:
+    """
+    Raise ValueError if *url* resolves to a private/loopback/metadata address
+    or uses a non-HTTP(S) scheme.
+    Set ALLOW_LOCAL_TARGETS=true to skip this check for local development.
+    """
+    if _ALLOW_LOCAL:
+        return
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"SSRF protection: scheme '{parsed.scheme}' is not allowed. "
+            f"Only http:// and https:// are permitted."
+        )
+
+    hostname = parsed.hostname or ""
+    try:
+        resolved_ip = socket.gethostbyname(hostname)
+    except socket.gaierror:
+        # Cannot resolve — allow to fail naturally at request time
+        return
+
+    try:
+        addr = ipaddress.ip_address(resolved_ip)
+    except ValueError:
+        return
+
+    for network in _BLOCKED_NETWORKS:
+        if addr in network:
+            raise ValueError(
+                f"SSRF protection: target URL '{url}' resolves to a "
+                f"private/loopback/metadata IP address ({resolved_ip}). "
+                f"Set ALLOW_LOCAL_TARGETS=true to test local APIs."
+            )
 
 
 def build_url(endpoint, path_params):
@@ -187,12 +242,17 @@ def execute_test(test, base_url=DEFAULT_BASE_URL):
 
     try:
 
+        # SSRF protection: validate the target URL before sending the request.
+        _validate_target_url(full_url)
+
         response = requests.request(
             method=method,
             url=full_url,
             params=query_params,
             headers=headers,
-            json=body
+            json=body,
+            timeout=30,          # prevent infinite hangs on slow/unresponsive targets
+            allow_redirects=True
         )
 
         print(
@@ -446,10 +506,14 @@ def run_all_tests(
                 f"{result['failure_reason']}"
             )
 
-            # UNCERTAIN_EXPECTATION: the AI guessed the expected outcome and
-            # the API disagreed.  This is NOT a confirmed API defect — do not
-            # generate a bug report or run AI analysis for it.
-            if result.get("failure_type") == "UNCERTAIN_EXPECTATION":
+            # ── Failure classification and routing ───────────────────────────
+            # Only confirmed API defects generate AI analysis + bug reports.
+            # All other failure types are logged with a diagnostic label and
+            # stored as test results, but do NOT produce bug reports.
+
+            failure_type = result.get("failure_type")
+
+            if failure_type == "UNCERTAIN_EXPECTATION":
                 print(
                     "[Validator] UNCERTAIN_EXPECTATION — skipping bug report "
                     "(AI expectation was low-confidence or flagged for review)."
@@ -458,12 +522,61 @@ def run_all_tests(
                 result["bug_report"] = None
                 continue
 
-            # Analyze failed test using AI
+            if failure_type == "RESOURCE_NOT_FOUND":
+                print(
+                    "[Validator] RESOURCE_NOT_FOUND — skipping bug report "
+                    "(resource likely doesn't exist; no setup step was run)."
+                )
+                result["ai_analysis"] = None
+                result["bug_report"] = None
+                continue
+
+            if failure_type == "NEEDS_REVIEW":
+                print(
+                    "[Validator] NEEDS_REVIEW — skipping bug report "
+                    "(both expected and actual are 4xx; test expectation may be wrong)."
+                )
+                result["ai_analysis"] = None
+                result["bug_report"] = None
+                continue
+
+            if failure_type == "INFRASTRUCTURE_FAILURE":
+                print(
+                    "[Validator] INFRASTRUCTURE_FAILURE — skipping bug report "
+                    "(network/timeout error; not an API defect)."
+                )
+                result["ai_analysis"] = None
+                result["bug_report"] = None
+                continue
+
+            # Only API_DEFECT failures reach this point.
+            if failure_type != "API_DEFECT":
+                # Unknown failure type — log and skip to be safe.
+                print(
+                    f"[Validator] Unknown failure_type '{failure_type}' — "
+                    "skipping bug report."
+                )
+                result["ai_analysis"] = None
+                result["bug_report"] = None
+                continue
+
+            # Analyze confirmed API defect using AI
             analysis = analyze_failure(
                 result
             )
 
             result["ai_analysis"] = analysis
+
+            # If the AI analyzer itself failed, preserve the test result but
+            # do NOT generate a bug report based on a failed analysis.
+            if analysis.get("analyzer_failed"):
+                print(
+                    "[AI Analyzer] Analysis unavailable — skipping bug report "
+                    "for this failure (AI analyzer was unreachable or returned "
+                    "an invalid response). The FAIL status is preserved."
+                )
+                result["bug_report"] = None
+                continue
 
             bug_counter += 1
             bug_report = generate_bug_report(result, bug_counter=bug_counter)

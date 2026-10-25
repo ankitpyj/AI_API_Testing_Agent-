@@ -66,6 +66,46 @@ def validate_response(result):
                 f"This may indicate a test expectation error rather than "
                 f"an API defect. Manual review recommended."
             )
+
+        elif (
+            isinstance(expected_status, int)
+            and 200 <= expected_status < 300
+            and actual_status in (404, 410)
+            and result.get("request", {}).get("path_params")
+        ):
+            # Positive test hit a 404/410 and path parameters were present.
+            # The most likely cause is that the resource does not exist in the
+            # target API's database, NOT that the endpoint is broken.
+            # Classify as RESOURCE_NOT_FOUND to prevent a false bug report.
+            failure_type = "RESOURCE_NOT_FOUND"
+            failure_reasons.append(
+                f"Expected HTTP status {expected_status} but received "
+                f"{actual_status}. The requested resource may not exist in "
+                f"the target API's database. This is a test precondition "
+                f"failure, NOT a confirmed API defect — no resource was "
+                f"created before this test ran."
+            )
+
+        elif (
+            isinstance(expected_status, int)
+            and 400 <= expected_status < 500
+            and isinstance(actual_status, int)
+            and 400 <= actual_status < 500
+            and actual_status != expected_status
+        ):
+            # Both expected and actual are client-error codes.
+            # The test correctly predicted a client error but got a different
+            # 4xx code (e.g., expected 422, got 400). Both mean the API
+            # rejected the request. Classify as NEEDS_REVIEW, NOT API_DEFECT.
+            failure_type = "NEEDS_REVIEW"
+            failure_reasons.append(
+                f"Expected HTTP status {expected_status} but received "
+                f"{actual_status}. Both are client-error responses — the API "
+                f"rejected the request as expected, but with a different status "
+                f"code. The test expectation may be incorrect; manual review "
+                f"recommended before classifying as a defect."
+            )
+
         else:
             failure_type = "API_DEFECT"
             failure_reasons.append(
