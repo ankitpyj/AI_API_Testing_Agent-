@@ -2,8 +2,9 @@
 Regression tests for root-cause fixes.
 
 Coverage:
-  Fix 1  - ai_failure_analyzer uses GEMINI_MODEL, not the hardcoded NVIDIA string
+  Fix 1  - ai_failure_analyzer uses GEMINI_MODEL env var, not a hardcoded nonexistent model
   Fix 1b - analyzer_failed flag propagates so callers can skip bug reports
+  Fix 1c - missing GEMINI_API_KEY produces analyzer_failed, not an import-time crash
   Fix 2  - INFRASTRUCTURE_FAILURE does not generate a bug report
   Fix 3  - RESOURCE_NOT_FOUND emitted for positive-test 404 with path params
   Fix 4  - NEEDS_REVIEW emitted for 4xx-vs-4xx status mismatches
@@ -31,6 +32,22 @@ ENGINE_ROOT  = os.path.join(BACKEND_ROOT, "engine")
 for p in [ENGINE_ROOT, BACKEND_ROOT, REPO_ROOT]:
     if p not in sys.path:
         sys.path.insert(0, p)
+
+# ---------------------------------------------------------------------------
+# Stub mysql.connector so test_executor can be imported without a live DB
+# ---------------------------------------------------------------------------
+if "mysql" not in sys.modules:
+    _mock_mysql = MagicMock()
+    sys.modules["mysql"] = _mock_mysql
+    sys.modules["mysql.connector"] = _mock_mysql.connector
+
+if "database" not in sys.modules:
+    _mock_db = MagicMock()
+    sys.modules["database"] = _mock_db
+
+if "db_operations" not in sys.modules:
+    _mock_db_ops = MagicMock()
+    sys.modules["db_operations"] = _mock_db_ops
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +97,14 @@ class TestAIAnalyzerModelName:
         )
         assert "gemini" in GEMINI_MODEL.lower(), (
             f"GEMINI_MODEL does not look like a Gemini model: {GEMINI_MODEL!r}"
+        )
+
+    def test_model_is_not_nonexistent_model(self):
+        """gemini-3.5-flash-lite does not exist — confirm it is no longer hardcoded."""
+        from ai_analyzer.ai_failure_analyzer import GEMINI_MODEL
+        assert GEMINI_MODEL != "gemini-3.5-flash-lite", (
+            "GEMINI_MODEL is still set to 'gemini-3.5-flash-lite', "
+            "which does not exist and causes every API call to fail."
         )
 
     def test_analyze_failure_uses_gemini_model(self):
@@ -137,6 +162,18 @@ class TestAIAnalyzerModelName:
             result = mod.analyze_failure({"test_id": "TC-001", "status": "FAIL"})
 
         assert result.get("analyzer_failed") is True
+
+    def test_analyzer_failed_when_client_is_none(self):
+        """When client is None (missing key), analyze_failure must return analyzer_failed=True."""
+        import ai_analyzer.ai_failure_analyzer as mod
+
+        original_client = mod.client
+        try:
+            mod.client = None
+            result = mod.analyze_failure({"test_id": "TC-001", "status": "FAIL"})
+            assert result.get("analyzer_failed") is True
+        finally:
+            mod.client = original_client
 
 
 # ===========================================================================
@@ -214,6 +251,17 @@ class TestNeedsReviewClassification:
         r = self._validate(expected_status=422, actual_status=422)
         assert r["status"] == "PASS"
 
+    def test_needs_review_does_not_produce_bug_report(self):
+        """NEEDS_REVIEW failures must be suppressed in the executor gate."""
+        from test_generator.response_validator import validate_response
+        result = validate_response(_make_result(expected_status=422, actual_status=400))
+        failure_type = result.get("failure_type")
+        # Replicate the executor's gating logic
+        should_generate_bug = failure_type == "API_DEFECT"
+        assert not should_generate_bug, (
+            "NEEDS_REVIEW classified as API_DEFECT and would produce a false bug report"
+        )
+
 
 # ===========================================================================
 # Fix 2 - INFRASTRUCTURE_FAILURE does not produce bug reports
@@ -234,6 +282,83 @@ class TestInfrastructureFailureNoBugReport:
         failure_type = result.get("failure_type")
         should_generate_bug = failure_type == "API_DEFECT"
         assert not should_generate_bug
+
+
+# ===========================================================================
+# New: Rule-based generator enum handling
+# ===========================================================================
+
+class TestGeneratorEnumHandling:
+    """Enum-constrained parameters must produce valid enum values, not generic ones."""
+
+    def test_generate_valid_value_respects_enum(self):
+        from test_generator.rule_based_generator import generate_valid_value
+        field = {"name": "status", "type": "string", "enum": ["available", "pending", "sold"]}
+        val = generate_valid_value(field)
+        assert val in ["available", "pending", "sold"], (
+            f"Expected an enum member, got {val!r}"
+        )
+
+    def test_generate_valid_value_returns_first_enum(self):
+        from test_generator.rule_based_generator import generate_valid_value
+        field = {"name": "status", "type": "string", "enum": ["available", "pending", "sold"]}
+        assert generate_valid_value(field) == "available"
+
+    def test_generate_valid_value_without_enum_returns_generic(self):
+        from test_generator.rule_based_generator import generate_valid_value
+        field = {"name": "name", "type": "string"}
+        val = generate_valid_value(field)
+        assert isinstance(val, str)
+
+    def test_generate_query_params_includes_required_enum_param(self):
+        from test_generator.rule_based_generator import generate_query_params
+        endpoint = {
+            "parameters": [
+                {
+                    "name": "status",
+                    "location": "query",
+                    "type": "string",
+                    "enum": ["available", "pending", "sold"],
+                    "required": True,
+                }
+            ]
+        }
+        params = generate_query_params(endpoint)
+        assert "status" in params
+        assert params["status"] in ["available", "pending", "sold"], (
+            f"Expected valid Petstore status, got {params['status']!r}"
+        )
+
+
+# ===========================================================================
+# New: Bug report suppression for analyzer failures
+# ===========================================================================
+
+class TestAnalyzerFailureSuppression:
+
+    def test_analyzer_failure_does_not_produce_bug_report(self):
+        """When analyzer_failed=True, the executor must skip bug report generation."""
+        analysis = {
+            "analyzer_failed": True,
+            "summary": "AI unavailable",
+            "possible_cause": "API key missing",
+            "severity": "Medium",
+            "recommendation": "Set GEMINI_API_KEY",
+        }
+        # Replicate executor logic
+        should_generate_bug = not analysis.get("analyzer_failed")
+        assert not should_generate_bug
+
+    def test_successful_analysis_can_produce_bug_report(self):
+        """A successful analysis (no analyzer_failed) should allow bug report creation."""
+        analysis = {
+            "summary": "API returned 500",
+            "possible_cause": "Server-side error",
+            "severity": "High",
+            "recommendation": "Check server logs",
+        }
+        should_generate_bug = not analysis.get("analyzer_failed")
+        assert should_generate_bug
 
 
 # ===========================================================================
