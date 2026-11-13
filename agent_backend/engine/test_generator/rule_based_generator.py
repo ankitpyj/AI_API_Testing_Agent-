@@ -62,8 +62,19 @@ def get_expected_validation_error_status(endpoint):
 
 def generate_valid_value(field):
     """
-    Generate a valid value based on field type/format.
+    Generate a valid value based on field type/format/enum.
+
+    Enum fields always return the first documented valid enum value so that
+    positive tests send schema-compliant data (e.g. "available" for the
+    Petstore status parameter, not a generic "Test User" string that would
+    cause the API to return 400).
     """
+
+    # Honour enum constraints first — a generic type-based value may not be
+    # a member of the enum and will cause positive tests to receive 400/422.
+    enum_values = field.get("enum")
+    if enum_values:
+        return enum_values[0]
 
     field_type = field.get("type")
     field_format = field.get("format")
@@ -240,45 +251,60 @@ def generate_path_params(endpoint):
     return path_params
 
 
-def generate_query_params(endpoint):
+def generate_query_params(endpoint, required_only=False):
     """
     Generate valid values for query parameters.
+
+    Parameters
+    ----------
+    required_only : bool
+        When True, only include query parameters marked as required=True in
+        the OpenAPI spec.  Positive tests MUST include all required query
+        params; omitting them will cause the API to return 400 instead of 200.
     """
 
     query_params = {}
 
     for parameter in endpoint.get("parameters", []):
 
-        if parameter.get("location") == "query":
+        if parameter.get("location") != "query":
+            continue
 
-            query_params[parameter["name"]] = (
-                generate_valid_value(parameter)
-            )
+        # Skip optional params when caller only wants required ones
+        if required_only and not parameter.get("required", False):
+            continue
+
+        query_params[parameter["name"]] = (
+            generate_valid_value(parameter)
+        )
 
     return query_params
 
 
-def create_request(endpoint, body=None):
+def create_request(endpoint, body=None, required_query_only=False):
     """
     Create a standardized HTTP request structure.
+
+    For positive tests pass required_query_only=False (default) to include all
+    documented query params with valid values.
     """
 
     return {
         "path_params": generate_path_params(endpoint),
-        "query_params": generate_query_params(endpoint),
+        "query_params": generate_query_params(endpoint, required_only=required_query_only),
         "headers": {},
         "body": body
     }
 
 
-def generate_tests_for_endpoint(endpoint,openapi_data):
+def generate_tests_for_endpoint(endpoint, openapi_data):
 
     tests = []
 
     # Generate path parameters
     path_params = generate_path_params(endpoint)
 
-    # Generate query parameters
+    # Generate query parameters (all, with valid enum-aware values)
     query_params = generate_query_params(endpoint)
 
     # ---------------------------------------
@@ -304,7 +330,8 @@ def generate_tests_for_endpoint(endpoint,openapi_data):
                 ),
                 "response_schema": get_expected_success_response(
                     endpoint,
-                    openapi_data)}
+                    openapi_data)
+            }
         })
 
         return tests

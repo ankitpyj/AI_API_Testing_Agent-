@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,15 +12,33 @@ from engine.test_generator.rule_based_generator import (
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(BACKEND_ROOT / ".env")
 
-# Gemini client
-client = OpenAI(
-    api_key=os.getenv("GEMINI_API_KEY"),
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-    timeout=60.0,
-    max_retries=0
-)
+logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-3.5-flash-lite"
+# Model — configurable via env var; default is a real, available Gemini model.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-8b")
+
+# Client — deferred key check so a missing GEMINI_API_KEY does not crash at
+# import time.  generate_ai_tests() handles a None client by returning [].
+_api_key = os.getenv("GEMINI_API_KEY")
+if not _api_key:
+    logger.warning(
+        "[AI Generator] GEMINI_API_KEY is not set. "
+        "AI test generation will be skipped."
+    )
+
+try:
+    client = OpenAI(
+        api_key=_api_key or "placeholder-key-not-set",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        timeout=60.0,
+        max_retries=0,
+    )
+except Exception as _client_init_error:
+    logger.warning(
+        "[AI Generator] Failed to initialise Gemini client: %s",
+        _client_init_error,
+    )
+    client = None
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +221,15 @@ def generate_ai_tests(api_info):
       - requires_review        : True when the expectation is uncertain
       - review_reason          : explanation when requires_review is True
     """
+    # Guard: if client is None (missing key), skip gracefully.
+    if client is None:
+        logger.warning(
+            "[AI Generator] Client not initialised for %s %s — skipping AI tests.",
+            api_info.get("method"),
+            api_info.get("path"),
+        )
+        return []
+
     success_status = get_expected_success_status(api_info)
     documented_codes = _documented_status_codes(api_info)
     is_auth = _is_auth_endpoint(api_info)
