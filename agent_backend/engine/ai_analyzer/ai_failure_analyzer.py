@@ -11,17 +11,22 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Import common retry helper
+try:
+    from engine.common.gemini_retry import execute_with_retry
+except ImportError:
+    try:
+        from common.gemini_retry import execute_with_retry
+    except ImportError:
+        from agent_backend.engine.common.gemini_retry import execute_with_retry
+
 # ---------------------------------------------------------------------------
 # Model configuration
 # ---------------------------------------------------------------------------
 # Use GEMINI_MODEL env var so this can be overridden in Render without a code
-# change.  The default is a real, low-cost model available via the Gemini
-# OpenAI-compatibility endpoint.
-#
-# WARNING: "gemini-3.5-flash-lite" does NOT exist — using it causes every API
-# call to fail with a model-not-found error, producing analyzer_failed=True on
-# every result.  Always verify the model name at ai.google.dev/gemini-api/docs.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-8b")
+# change. Default is 'gemini-flash-lite-latest', which is Google's active, supported
+# lightweight model alias that reliably handles JSON generation.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
 
 # ---------------------------------------------------------------------------
 # Client initialisation
@@ -132,26 +137,27 @@ Keep each JSON value short.
 
 
     try:
+        def _call_gemini():
+            return client.chat.completions.create(
+                model=GEMINI_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.2,
+                max_tokens=1000,
+                timeout=120,
+                response_format={"type": "json_object"}
+            )
 
-        response = client.chat.completions.create(
-
-            model=GEMINI_MODEL,
-
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-
-            temperature=0.2,
-
-            max_tokens=500,
-
-            timeout=120,
-            response_format={"type": "json_object"}
+        response = execute_with_retry(
+            _call_gemini,
+            max_retries=3,
+            base_delay=2.0,
+            caller_name="AI Analyzer",
         )
-
 
         response_text = (
             response.choices[0]
