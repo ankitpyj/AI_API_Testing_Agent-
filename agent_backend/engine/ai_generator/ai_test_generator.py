@@ -14,8 +14,17 @@ load_dotenv(BACKEND_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
 
+# Import common retry helper
+try:
+    from engine.common.gemini_retry import execute_with_retry, is_transient_error
+except ImportError:
+    try:
+        from common.gemini_retry import execute_with_retry, is_transient_error
+    except ImportError:
+        from agent_backend.engine.common.gemini_retry import execute_with_retry, is_transient_error
+
 # Model — configurable via env var; default is a real, available Gemini model.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-8b")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
 
 # Client — deferred key check so a missing GEMINI_API_KEY does not crash at
 # import time.  generate_ai_tests() handles a None client by returning [].
@@ -332,16 +341,13 @@ code for each test based on the decision rules. The tests array must contain exa
 Do not include markdown, explanations, or any text outside the JSON object.
 """
 
-    for attempt in range(1, 4):
-        print(f"[AI Generator] Attempt {attempt}/3")
-
-        try:
+    try:
+        def _call_gemini():
             print(
                 f"[AI Generator] Calling Gemini API "
                 f"(model: {GEMINI_MODEL})..."
             )
-
-            response = client.chat.completions.create(
+            return client.chat.completions.create(
                 model=GEMINI_MODEL,
                 messages=[
                     {"role": "user", "content": prompt}
@@ -351,252 +357,260 @@ Do not include markdown, explanations, or any text outside the JSON object.
                 response_format={"type": "json_object"}
             )
 
-            message = response.choices[0].message
-            response_text = (message.content or "").strip()
+        response = execute_with_retry(
+            _call_gemini,
+            max_retries=3,
+            base_delay=2.0,
+            caller_name="AI Generator",
+        )
 
-            if not response_text:
-                raise ValueError("Empty response from AI API")
+        message = response.choices[0].message
+        response_text = (message.content or "").strip()
 
-            # Parse the first complete JSON object.
-            start = response_text.find("{")
+        if not response_text:
+            raise ValueError("Empty response from AI API")
 
-            if start == -1:
-                raise ValueError("No JSON object found in AI response")
+        # Strip markdown fences if present
+        if response_text.startswith("```"):
+            lines = response_text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            response_text = "\n".join(lines).strip()
 
-            data, _ = json.JSONDecoder().raw_decode(
-                response_text[start:]
+        # Parse the first complete JSON object.
+        start = response_text.find("{")
+
+        if start == -1:
+            raise ValueError("No JSON object found in AI response")
+
+        data, _ = json.JSONDecoder().raw_decode(
+            response_text[start:]
+        )
+
+        tests = data.get("tests")
+
+        if not isinstance(tests, list) or len(tests) != 5:
+            raise ValueError(
+                f"AI must return exactly 5 tests, got "
+                f"{len(tests) if isinstance(tests, list) else type(tests).__name__}"
             )
 
-            tests = data.get("tests")
+        ai_tests = []
 
-            if not isinstance(tests, list) or len(tests) != 5:
+        for test in tests:
+            if not isinstance(test, dict):
+                raise ValueError("Each test must be a JSON object")
+
+            if not all(
+                key in test
+                for key in ("category", "description", "request")
+            ):
                 raise ValueError(
-                    f"AI must return exactly 5 tests, got "
-                    f"{len(tests) if isinstance(tests, list) else type(tests).__name__}"
+                    f"AI test missing required fields; got keys: "
+                    f"{list(test.keys())}"
                 )
 
-            ai_tests = []
+            request = test["request"]
 
-            for test in tests:
-                if not isinstance(test, dict):
-                    raise ValueError("Each test must be a JSON object")
+            if not isinstance(request, dict):
+                raise ValueError("Test request must be a JSON object")
 
-                if not all(
-                    key in test
-                    for key in ("category", "description", "request")
-                ):
-                    raise ValueError(
-                        f"AI test missing required fields; got keys: "
-                        f"{list(test.keys())}"
-                    )
-
-                request = test["request"]
-
-                if not isinstance(request, dict):
-                    raise ValueError("Test request must be a JSON object")
-
-                if "body" not in request:
-                    raise ValueError(
-                        "AI test request must include a body key"
-                    )
-
-                if not isinstance(request["body"], dict):
-                    raise ValueError(
-                        "AI test request body must be a JSON object"
-                    )
-
-                expected = test.get("expected")
-
-                if not isinstance(expected, dict):
-                    raise ValueError(
-                        "AI test must include an expected object"
-                    )
-
-                # Diagnostic log: raw AI expected_status_code
-                raw_status_code = expected.get("status_code")
-                _debug_log(f"raw AI expected_status_code: {raw_status_code}")
-
-                status_code = raw_status_code
-
-                if (
-                    not isinstance(status_code, int)
-                    or isinstance(status_code, bool)
-                    or not 100 <= status_code <= 599
-                ):
-                    raise ValueError(
-                        f"expected.status_code must be a valid HTTP status "
-                        f"integer, got {status_code!r}"
-                    )
-
-                # Diagnostic log: expected_status_code after parsing
-                _debug_log(f"expected_status_code after parsing: {status_code}")
-
-                # --------------- Provenance / confidence ---------------
-                raw_source = test.get("expected_source", "")
-                raw_confidence = test.get("expectation_confidence", "")
-                raw_requires_review = test.get("requires_review")
-                raw_review_reason = test.get("review_reason")
-
-                # Normalise source
-                if raw_source not in (
-                    EXPECTED_SOURCE_OPENAPI,
-                    EXPECTED_SOURCE_INFERRED,
-                    EXPECTED_SOURCE_FIXTURE,
-                ):
-                    raw_source = EXPECTED_SOURCE_INFERRED
-
-                # Normalise confidence
-                if raw_confidence not in (_HIGH_CONFIDENCE, _LOW_CONFIDENCE):
-                    raw_confidence = _LOW_CONFIDENCE
-
-                # Normalise requires_review to bool
-                if isinstance(raw_requires_review, bool):
-                    requires_review = raw_requires_review
-                elif isinstance(raw_requires_review, str):
-                    requires_review = raw_requires_review.lower() in (
-                        "true", "1", "yes"
-                    )
-                else:
-                    requires_review = False
-
-                # Normalise review_reason to str or None
-                if isinstance(raw_review_reason, str) and raw_review_reason.strip():
-                    review_reason = raw_review_reason.strip()
-                else:
-                    review_reason = None
-
-                # Check whether request payload violates documented schema constraints
-                payload = request.get("body", {})
-                violates_schema, schema_violation_reason = _payload_violates_documented_schema(
-                    payload, api_info
+            if "body" not in request:
+                raise ValueError(
+                    "AI test request must include a body key"
                 )
 
-                # ── Deterministic enforcement gate ──────────────────────────
-                # 1. Schema-valid inputs expecting 422:
-                # HTTP 422 is ONLY for schema-validation errors. If the payload does
-                # not violate any documented schema constraint, expecting 422 is an
-                # ungrounded expectation that must be corrected.
-                if status_code == 422 and not violates_schema:
-                    if is_auth:
-                        # On authentication endpoints, schema-valid credentials test
-                        # authentication, not schema validation.
-                        status_code = 401
-                        if 401 in documented_codes:
-                            raw_source = EXPECTED_SOURCE_OPENAPI
-                            raw_confidence = _HIGH_CONFIDENCE
-                            requires_review = False
-                            review_reason = None
-                        else:
-                            raw_source = EXPECTED_SOURCE_INFERRED
-                            raw_confidence = _LOW_CONFIDENCE
-                            requires_review = True
-                            review_reason = (
-                                "Authentication endpoints return 401 for invalid credentials; "
-                                "input is schema-valid so 422 is not expected. "
-                                "HTTP 401 is inferred as it is not explicitly listed in OpenAPI responses."
-                            )
-                    else:
-                        # On non-auth endpoints, schema-valid inputs are expected to succeed.
-                        status_code = success_status
-                        raw_source = (
-                            EXPECTED_SOURCE_OPENAPI
-                            if success_status in documented_codes
-                            else EXPECTED_SOURCE_INFERRED
-                        )
-                        raw_confidence = (
-                            _HIGH_CONFIDENCE
-                            if success_status in documented_codes
-                            else _LOW_CONFIDENCE
-                        )
-                        requires_review = success_status not in documented_codes
-                        if requires_review:
-                            review_reason = (
-                                f"Input is schema-valid. Expected success status {success_status} "
-                                f"is not in documented responses."
-                            )
-                        else:
-                            review_reason = None
+            if not isinstance(request["body"], dict):
+                raise ValueError(
+                    "AI test request body must be a JSON object"
+                )
 
-                # 2. Authentication endpoints expecting 401:
-                elif is_auth and status_code == 401:
+            expected = test.get("expected")
+
+            if not isinstance(expected, dict):
+                raise ValueError(
+                    "AI test must include an expected object"
+                )
+
+            # Diagnostic log: raw AI expected_status_code
+            raw_status_code = expected.get("status_code")
+            _debug_log(f"raw AI expected_status_code: {raw_status_code}")
+
+            status_code = raw_status_code
+
+            if (
+                not isinstance(status_code, int)
+                or isinstance(status_code, bool)
+                or not 100 <= status_code <= 599
+            ):
+                raise ValueError(
+                    f"expected.status_code must be a valid HTTP status "
+                    f"integer, got {status_code!r}"
+                )
+
+            # Diagnostic log: expected_status_code after parsing
+            _debug_log(f"expected_status_code after parsing: {status_code}")
+
+            # --------------- Provenance / confidence ---------------
+            raw_source = test.get("expected_source", "")
+            raw_confidence = test.get("expectation_confidence", "")
+            raw_requires_review = test.get("requires_review")
+            raw_review_reason = test.get("review_reason")
+
+            # Normalise source
+            if raw_source not in (
+                EXPECTED_SOURCE_OPENAPI,
+                EXPECTED_SOURCE_INFERRED,
+                EXPECTED_SOURCE_FIXTURE,
+            ):
+                raw_source = EXPECTED_SOURCE_INFERRED
+
+            # Normalise confidence
+            if raw_confidence not in (_HIGH_CONFIDENCE, _LOW_CONFIDENCE):
+                raw_confidence = _LOW_CONFIDENCE
+
+            # Normalise requires_review to bool
+            if isinstance(raw_requires_review, bool):
+                requires_review = raw_requires_review
+            elif isinstance(raw_requires_review, str):
+                requires_review = raw_requires_review.lower() in (
+                    "true", "1", "yes"
+                )
+            else:
+                requires_review = False
+
+            # Normalise review_reason to str or None
+            if isinstance(raw_review_reason, str) and raw_review_reason.strip():
+                review_reason = raw_review_reason.strip()
+            else:
+                review_reason = None
+
+            # Check whether request payload violates documented schema constraints
+            payload = request.get("body", {})
+            violates_schema, schema_violation_reason = _payload_violates_documented_schema(
+                payload, api_info
+            )
+
+            # ── Deterministic enforcement gate ──────────────────────────
+            # 1. Schema-valid inputs expecting 422:
+            # HTTP 422 is ONLY for schema-validation errors. If the payload does
+            # not violate any documented schema constraint, expecting 422 is an
+            # ungrounded expectation that must be corrected.
+            if status_code == 422 and not violates_schema:
+                if is_auth:
+                    # On authentication endpoints, schema-valid credentials test
+                    # authentication, not schema validation.
+                    status_code = 401
                     if 401 in documented_codes:
                         raw_source = EXPECTED_SOURCE_OPENAPI
                         raw_confidence = _HIGH_CONFIDENCE
                         requires_review = False
+                        review_reason = None
                     else:
                         raw_source = EXPECTED_SOURCE_INFERRED
                         raw_confidence = _LOW_CONFIDENCE
                         requires_review = True
-                        if not review_reason:
-                            review_reason = (
-                                "HTTP 401 is standard for authentication failure but not "
-                                "explicitly listed in OpenAPI responses."
-                            )
+                        review_reason = (
+                            "Authentication endpoints return 401 for invalid credentials; "
+                            "input is schema-valid so 422 is not expected. "
+                            "HTTP 401 is inferred as it is not explicitly listed in OpenAPI responses."
+                        )
+                else:
+                    # On non-auth endpoints, schema-valid inputs are expected to succeed.
+                    status_code = success_status
+                    raw_source = (
+                        EXPECTED_SOURCE_OPENAPI
+                        if success_status in documented_codes
+                        else EXPECTED_SOURCE_INFERRED
+                    )
+                    raw_confidence = (
+                        _HIGH_CONFIDENCE
+                        if success_status in documented_codes
+                        else _LOW_CONFIDENCE
+                    )
+                    requires_review = success_status not in documented_codes
+                    if requires_review:
+                        review_reason = (
+                            f"Input is schema-valid. Expected success status {success_status} "
+                            f"is not in documented responses."
+                        )
+                    else:
+                        review_reason = None
 
-                # 3. Status code not in documented codes:
-                if documented_codes and status_code not in documented_codes:
+            # 2. Authentication endpoints expecting 401:
+            elif is_auth and status_code == 401:
+                if 401 in documented_codes:
+                    raw_source = EXPECTED_SOURCE_OPENAPI
+                    raw_confidence = _HIGH_CONFIDENCE
+                    requires_review = False
+                else:
                     raw_source = EXPECTED_SOURCE_INFERRED
                     raw_confidence = _LOW_CONFIDENCE
                     requires_review = True
                     if not review_reason:
                         review_reason = (
-                            f"Status code {status_code} is not in the "
-                            f"documented responses "
-                            f"({', '.join(str(c) for c in sorted(documented_codes))}). "
-                            f"Expected outcome cannot be confirmed from the contract."
+                            "HTTP 401 is standard for authentication failure but not "
+                            "explicitly listed in OpenAPI responses."
                         )
 
-                # 4. Security rule: force auth endpoints with positive expectation
-                # without configured valid credentials to require review.
-                if is_auth and 200 <= status_code < 300:
-                    if raw_source != EXPECTED_SOURCE_FIXTURE:
-                        requires_review = True
-                        raw_confidence = _LOW_CONFIDENCE
-                        if not review_reason:
-                            review_reason = (
-                                "Authentication success cannot be asserted without "
-                                "configured valid credentials."
-                            )
+            # 3. Status code not in documented codes:
+            if documented_codes and status_code not in documented_codes:
+                raw_source = EXPECTED_SOURCE_INFERRED
+                raw_confidence = _LOW_CONFIDENCE
+                requires_review = True
+                if not review_reason:
+                    review_reason = (
+                        f"Status code {status_code} is not in the "
+                        f"documented responses "
+                        f"({', '.join(str(c) for c in sorted(documented_codes))}). "
+                        f"Expected outcome cannot be confirmed from the contract."
+                    )
 
-                # Diagnostic log: fields after enforcement gate
-                _debug_log(
-                    f"after enforcement gate: expected_status_code={status_code}, "
-                    f"expected_source={raw_source}, expectation_confidence={raw_confidence}, "
-                    f"requires_review={requires_review}"
-                )
+            # 4. Security rule: force auth endpoints with positive expectation
+            # without configured valid credentials to require review.
+            if is_auth and 200 <= status_code < 300:
+                if raw_source != EXPECTED_SOURCE_FIXTURE:
+                    requires_review = True
+                    raw_confidence = _LOW_CONFIDENCE
+                    if not review_reason:
+                        review_reason = (
+                            "Authentication success cannot be asserted without "
+                            "configured valid credentials."
+                        )
 
-                # Low-confidence or review-required tests are tagged so
-                # downstream consumers can handle them gracefully.
-                ai_tests.append({
-                    "endpoint": api_info["path"],
-                    "method": api_info["method"],
-                    "category": test["category"],
-                    "description": test["description"],
-                    "request": request,
-                    "expected": {
-                        "status_code": status_code
-                    },
-                    "expected_source": raw_source,
-                    "expectation_confidence": raw_confidence,
-                    "requires_review": requires_review,
-                    "review_reason": review_reason,
-                })
-
-            print(
-                f"[AI Generator] Successfully generated "
-                f"{len(ai_tests)} AI tests."
+            # Diagnostic log: fields after enforcement gate
+            _debug_log(
+                f"after enforcement gate: expected_status_code={status_code}, "
+                f"expected_source={raw_source}, expectation_confidence={raw_confidence}, "
+                f"requires_review={requires_review}"
             )
 
-            return ai_tests
+            # Low-confidence or review-required tests are tagged so
+            # downstream consumers can handle them gracefully.
+            ai_tests.append({
+                "endpoint": api_info["path"],
+                "method": api_info["method"],
+                "category": test["category"],
+                "description": test["description"],
+                "request": request,
+                "expected": {
+                    "status_code": status_code
+                },
+                "expected_source": raw_source,
+                "expectation_confidence": raw_confidence,
+                "requires_review": requires_review,
+                "review_reason": review_reason,
+            })
 
-        except Exception as e:
-            print(
-                f"[AI Generator] Attempt {attempt}/3 failed: {e}"
-            )
+        print(
+            f"[AI Generator] Successfully generated "
+            f"{len(ai_tests)} AI tests."
+        )
 
-            if attempt < 3:
-                print("[AI Generator] Retrying...")
-            else:
-                print("[AI Generator] All 3 attempts failed.")
+        return ai_tests
 
-    return []
+    except Exception as e:
+        print(f"[AI Generator] Generation failed: {e}")
+        return []
