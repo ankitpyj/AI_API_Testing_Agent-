@@ -539,5 +539,117 @@ class TestValidateResponseOutputKeys(unittest.TestCase):
         self.assertEqual(result["expected_body"], schema)
 
 
+# ===========================================================================
+# Tests: Advanced JSON Schema Features & Violation Reporting
+# ===========================================================================
+
+class TestAdvancedSchemaValidation(unittest.TestCase):
+    """Verifies schema validation features: unconstrained schemas, allOf, additionalProperties, multi-types."""
+
+    def test_unconstrained_schema_accepts_null(self):
+        """A schema with no 'type' keyword (e.g. {'title': 'Input'}) allows any value including null."""
+        from agent_backend.engine.test_generator.response_validator import validate_schema
+        self.assertTrue(validate_schema(None, {"title": "Input"}))
+        self.assertTrue(validate_schema("string_val", {"title": "Input"}))
+        self.assertTrue(validate_schema(12345, {"title": "Input"}))
+        self.assertTrue(validate_schema({"nested": "dict"}, {"title": "Input"}))
+
+    def test_fastapi_422_with_null_input_passes_schema(self):
+        """
+        TC-012, TC-013, TC-014, TC-028, TC-029:
+        FastAPI validation error responses include {'input': None} when null is submitted.
+        This must validate successfully against HTTPValidationError.
+        """
+        from agent_backend.engine.test_generator.response_validator import validate_schema
+        http_val_err_schema = {
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "loc": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]}},
+                            "msg": {"type": "string"},
+                            "type": {"type": "string"},
+                            "input": {"title": "Input"},
+                            "ctx": {"type": "object"},
+                        },
+                        "required": ["loc", "msg", "type"],
+                    },
+                }
+            },
+        }
+        # Actual responses from TC-012 and TC-028
+        tc12_resp = {"detail": [{"type": "string_type", "loc": ["body", "name"], "msg": "Input should be a valid string", "input": None}]}
+        tc28_resp = {"detail": [{"type": "string_type", "loc": ["body", "email"], "msg": "Input should be a valid string", "input": None}]}
+
+        self.assertTrue(validate_schema(tc12_resp, http_val_err_schema))
+        self.assertTrue(validate_schema(tc28_resp, http_val_err_schema))
+
+    def test_all_of_validation(self):
+        """allOf must pass when all subschemas match, fail when any fails."""
+        from agent_backend.engine.test_generator.response_validator import validate_schema
+        schema = {
+            "allOf": [
+                {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+                {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+            ]
+        }
+        self.assertTrue(validate_schema({"id": 1, "name": "Alice"}, schema))
+        self.assertFalse(validate_schema({"id": 1}, schema))  # missing name
+        self.assertFalse(validate_schema({"name": "Alice"}, schema))  # missing id
+
+    def test_additional_properties_false_rejects_extra(self):
+        """additionalProperties: False must reject unexpected properties."""
+        from agent_backend.engine.test_generator.response_validator import validate_schema
+        schema = {
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+            "additionalProperties": False,
+        }
+        self.assertTrue(validate_schema({"id": 1}, schema))
+        self.assertFalse(validate_schema({"id": 1, "extra_field": "disallowed"}, schema))
+
+    def test_additional_properties_schema_validates_values(self):
+        """additionalProperties with a schema dictionary validates map/dict entries."""
+        from agent_backend.engine.test_generator.response_validator import validate_schema
+        schema = {
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+            "additionalProperties": {"type": "string"},
+        }
+        self.assertTrue(validate_schema({"id": 1, "tag1": "valid_string"}, schema))
+        self.assertFalse(validate_schema({"id": 1, "tag1": 12345}, schema))  # 12345 is not string
+
+    def test_multi_type_list_support(self):
+        """OpenAPI 3.1 type: ['string', 'null'] allows both strings and null."""
+        from agent_backend.engine.test_generator.response_validator import validate_schema
+        schema = {"type": ["string", "null"]}
+        self.assertTrue(validate_schema("hello", schema))
+        self.assertTrue(validate_schema(None, schema))
+        self.assertFalse(validate_schema(12345, schema))
+
+    def test_schema_violations_populated_in_result_on_failure(self):
+        """When schema validation fails, result must contain detailed schema_violations."""
+        schema = {
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+            "required": ["id"],
+        }
+        result = _make_result(
+            response_schema=schema,
+            actual_body={"wrong_field": "val"},  # missing id
+        )
+        validated = validate_response(result)
+        self.assertEqual(validated["body_check"], "FAIL")
+        self.assertEqual(validated["status"], "FAIL")
+        self.assertIn("schema_violations", validated)
+        self.assertTrue(len(validated["schema_violations"]) > 0)
+        self.assertTrue(any("id" in v for v in validated["schema_violations"]))
+        # failure_reason must describe the exact mismatch
+        self.assertIn("missing required property", validated["failure_reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -337,33 +337,30 @@ def run_all_tests(
     if openapi_url is None:
         openapi_url = base_url.rstrip("/") + "/openapi.json"
 
-    # ── Step 1: Reset demo data (local API only) ────────────────────────
+    # ── Step 1: Reset demo data if supported by the target API ─────────
     reset_ok = True
 
-    if base_url.rstrip("/") == DEFAULT_BASE_URL.rstrip("/"):
-        try:
-            reset_response = requests.post(
-                f"{base_url.rstrip('/')}/reset",
-                timeout=5
-            )
+    try:
+        reset_response = requests.post(
+            f"{base_url.rstrip('/')}/reset",
+            timeout=5
+        )
 
-            if reset_response.status_code == 200:
-                print("[Reset] Test data restored successfully.")
-            else:
-                reset_ok = False
-                print(
-                    "[Reset] WARNING: /reset returned "
-                    f"{reset_response.status_code}. "
-                    "Tests that depend on user ID 1 may fail."
-                )
-
-        except requests.RequestException as e:
+        if reset_response.status_code == 200:
+            print("[Reset] Test data restored successfully.")
+        else:
             reset_ok = False
             print(
-                f"[Reset] WARNING: Could not reach target API: {e}. "
-                "Is the target API running on port 8000? "
-                "Tests that depend on user ID 1 may fail."
+                f"[Reset] Note: Target API /reset returned {reset_response.status_code}. "
+                "Tests that depend on pre-seeded resources (e.g. user ID 1) may report RESOURCE_NOT_FOUND."
             )
+
+    except requests.RequestException as e:
+        reset_ok = False
+        print(
+            f"[Reset] Note: Target API does not expose /reset ({e}). "
+            "Tests that depend on pre-seeded resources (e.g. user ID 1) may report RESOURCE_NOT_FOUND."
+        )
 
     # ── Step 2: Load OpenAPI spec ONCE and reuse it everywhere ──────────
     print("\nLoading OpenAPI specification...")

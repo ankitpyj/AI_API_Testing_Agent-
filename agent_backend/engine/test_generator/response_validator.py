@@ -123,22 +123,25 @@ def validate_response(result):
         # whatever unexpected response the API actually returned.
         body_result = "SKIP"
 
-    elif validate_schema(actual_body, expected_schema):
-        body_result = "PASS"
-
     else:
-        body_result = "FAIL"
-
-        if expectation_confidence == "low" or requires_review:
-            if failure_type is None:
-                failure_type = "UNCERTAIN_EXPECTATION"
+        violations = find_schema_violations(actual_body, expected_schema)
+        if not violations:
+            body_result = "PASS"
         else:
-            if failure_type is None:
-                failure_type = "API_DEFECT"
+            body_result = "FAIL"
 
-        failure_reasons.append(
-            "Response body does not match the expected schema."
-        )
+            if expectation_confidence == "low" or requires_review:
+                if failure_type is None:
+                    failure_type = "UNCERTAIN_EXPECTATION"
+            else:
+                if failure_type is None:
+                    failure_type = "API_DEFECT"
+
+            result["schema_violations"] = violations
+            mismatch_detail = "; ".join(violations[:3])
+            failure_reasons.append(
+                f"Response body does not match the expected schema: {mismatch_detail}"
+            )
 
     # ── 4. Determine overall result ───────────────────────────────────────
     overall_status = (
@@ -169,64 +172,91 @@ def validate_response(result):
 
 
 
-def validate_schema(data, schema, strict_examples=False):
+def find_schema_violations(data, schema, strict_examples=False, path=""):
     """
-    Validate response data against a simplified OpenAPI schema.
-    Keeps validation deterministic without LLM dependencies.
+    Validate response data against an OpenAPI/JSON Schema and return a list of
+    specific violation descriptions. An empty list means the data is valid.
+
     Supports:
-      - Objects with recursive validation of nested object properties
+      - Untyped / unconstrained schemas (accept any value, including None/null)
+      - Nullable fields (explicit nullable: True, type: 'null', or 'null' in type list)
+      - anyOf, oneOf, and allOf composition
+      - Objects with required fields, property validation, and additionalProperties
       - Arrays with element validation against items schema
-      - Top-level array response bodies (rejects dictionaries)
-      - Primitive data types with root and property enum constraints
-      - anyOf and oneOf composition
-      - Nullable fields
+      - Primitives (string, integer, number, boolean) with type list support
+      - Root and property enum and const constraints
       - Non-strict illustrative examples
     """
-
+    violations = []
     if not isinstance(schema, dict) or not schema:
-        return True
+        return violations
+
+    prefix = f'Field "{path}"' if path else 'Root'
 
     # -------------------------
-    # Nullable handling
+    # Null handling
     # -------------------------
     if data is None:
         if schema.get("nullable") is True:
-            return True
+            return violations
+        if schema.get("type") == "null":
+            return violations
+        if isinstance(schema.get("type"), list) and "null" in schema["type"]:
+            return violations
         if "anyOf" in schema and isinstance(schema["anyOf"], list):
-            if any(isinstance(opt, dict) and opt.get("type") == "null" for opt in schema["anyOf"]):
-                return True
+            if any(len(find_schema_violations(None, opt, strict_examples, path)) == 0 for opt in schema["anyOf"]):
+                return violations
         if "oneOf" in schema and isinstance(schema["oneOf"], list):
-            if any(isinstance(opt, dict) and opt.get("type") == "null" for opt in schema["oneOf"]):
-                return True
-        return False
+            if sum(1 for opt in schema["oneOf"] if len(find_schema_violations(None, opt, strict_examples, path)) == 0) == 1:
+                return violations
+        if "allOf" in schema and isinstance(schema["allOf"], list):
+            if all(len(find_schema_violations(None, opt, strict_examples, path)) == 0 for opt in schema["allOf"]):
+                return violations
+        if "enum" in schema and None in schema["enum"]:
+            return violations
+        if "const" in schema and schema["const"] is None:
+            return violations
+        # In JSON Schema, an unconstrained schema (without a "type" keyword) allows any value, including null
+        if "type" not in schema:
+            return violations
+
+        violations.append(f"{prefix}: null value not permitted by schema")
+        return violations
 
     # -------------------------
-    # anyOf / oneOf composition
+    # anyOf / oneOf / allOf composition
     # -------------------------
     if "anyOf" in schema and isinstance(schema["anyOf"], list):
-        return any(
-            validate_schema(data, opt, strict_examples=strict_examples)
-            for opt in schema["anyOf"]
-        )
+        if any(len(find_schema_violations(data, opt, strict_examples, path)) == 0 for opt in schema["anyOf"]):
+            return violations
+        violations.append(f"{prefix}: does not match any allowed anyOf schema")
+        return violations
 
     if "oneOf" in schema and isinstance(schema["oneOf"], list):
-        matches = [
-            opt for opt in schema["oneOf"]
-            if validate_schema(data, opt, strict_examples=strict_examples)
-        ]
-        return len(matches) == 1
+        matches = [opt for opt in schema["oneOf"] if len(find_schema_violations(data, opt, strict_examples, path)) == 0]
+        if len(matches) == 1:
+            return violations
+        violations.append(f"{prefix}: matches {len(matches)} oneOf schemas (expected exactly 1)")
+        return violations
 
-    schema_type = schema.get("type")
+    if "allOf" in schema and isinstance(schema["allOf"], list):
+        for opt in schema["allOf"]:
+            sub_errs = find_schema_violations(data, opt, strict_examples, path)
+            violations.extend(sub_errs)
+        if violations:
+            return violations
 
     # -------------------------
-    # Root / field enum / const constraint check
+    # const / enum constraints
     # -------------------------
     if "const" in schema and data != schema["const"]:
-        return False
+        violations.append(f"{prefix}: expected const {schema['const']!r}, received {data!r}")
+        return violations
 
     enum_values = schema.get("enum")
     if enum_values is not None and data not in enum_values:
-        return False
+        violations.append(f"{prefix}: value {data!r} not in permitted enum {enum_values}")
+        return violations
 
     # -------------------------
     # Strict example check (disabled by default)
@@ -234,56 +264,95 @@ def validate_schema(data, schema, strict_examples=False):
     example = schema.get("example")
     if example is not None and strict_examples:
         if data != example:
-            return False
+            violations.append(f"{prefix}: value {data!r} does not match strict example {example!r}")
+            return violations
+
+    schema_type = schema.get("type")
+    types = schema_type if isinstance(schema_type, list) else ([schema_type] if schema_type else [])
 
     # -------------------------
-    # Top-level Array handling
+    # Primitive types checking
     # -------------------------
-    if schema_type == "array":
-        if not isinstance(data, list):
-            return False
+    if types:
+        type_matched = False
+        for t in types:
+            if t == "string" and isinstance(data, str):
+                type_matched = True
+                break
+            elif t == "integer" and isinstance(data, int) and not isinstance(data, bool):
+                type_matched = True
+                break
+            elif t == "number" and isinstance(data, (int, float)) and not isinstance(data, bool):
+                type_matched = True
+                break
+            elif t == "boolean" and isinstance(data, bool):
+                type_matched = True
+                break
+            elif t == "array" and isinstance(data, list):
+                type_matched = True
+                break
+            elif t == "object" and isinstance(data, dict):
+                type_matched = True
+                break
+            elif t == "null" and data is None:
+                type_matched = True
+                break
+        if not type_matched:
+            expected_desc = "/".join(types)
+            violations.append(f"{prefix}: expected {expected_desc}, received {type(data).__name__}")
+            return violations
+
+    # -------------------------
+    # Array handling
+    # -------------------------
+    if (schema_type == "array" or "array" in types) and isinstance(data, list):
         items_schema = schema.get("items")
         if items_schema and isinstance(items_schema, dict):
-            for item in data:
-                if not validate_schema(item, items_schema, strict_examples=strict_examples):
-                    return False
-        return True
-
-    # -------------------------
-    # Primitive types handling
-    # -------------------------
-    if schema_type == "string":
-        return isinstance(data, str)
-    if schema_type == "integer":
-        return isinstance(data, int) and not isinstance(data, bool)
-    if schema_type == "number":
-        return isinstance(data, (int, float)) and not isinstance(data, bool)
-    if schema_type == "boolean":
-        return isinstance(data, bool)
+            for idx, item in enumerate(data):
+                item_path = f"{path}[{idx}]" if path else f"[{idx}]"
+                sub_errs = find_schema_violations(item, items_schema, strict_examples, item_path)
+                violations.extend(sub_errs)
 
     # -------------------------
     # Object handling
     # -------------------------
-    if schema_type == "object":
-        if not isinstance(data, dict):
-            return False
+    is_object_schema = (
+        schema_type == "object"
+        or "object" in types
+        or "properties" in schema
+        or "required" in schema
+    )
+    if is_object_schema and isinstance(data, dict):
+        required = schema.get("required", [])
+        for req in required:
+            if req not in data:
+                violations.append(f'{prefix}: missing required property "{req}"')
 
         properties = schema.get("properties", {})
-        required = schema.get("required", [])
+        for prop_name, prop_schema in properties.items():
+            if prop_name in data:
+                prop_path = f"{path}.{prop_name}" if path else prop_name
+                sub_errs = find_schema_violations(data[prop_name], prop_schema, strict_examples, prop_path)
+                violations.extend(sub_errs)
 
-        # Check required fields
-        for field in required:
-            if field not in data:
-                return False
+        # additionalProperties check
+        add_props = schema.get("additionalProperties")
+        if add_props is False:
+            extra_keys = [k for k in data if k not in properties]
+            if extra_keys:
+                violations.append(f"{prefix}: unexpected additional properties {extra_keys}")
+        elif isinstance(add_props, dict):
+            for k, v in data.items():
+                if k not in properties:
+                    item_path = f"{path}.{k}" if path else k
+                    violations.extend(find_schema_violations(v, add_props, strict_examples, item_path))
 
-        # Validate each property recursively against its schema
-        for field_name, field_schema in properties.items():
-            if field_name not in data:
-                continue
-            if not validate_schema(data[field_name], field_schema, strict_examples=strict_examples):
-                return False
+    return violations
 
-        return True
 
-    # If schema defines a custom/unrecognized type, skip without failing
-    return True
+def validate_schema(data, schema, strict_examples=False):
+    """
+    Validate response data against an OpenAPI/JSON Schema.
+    Returns True if valid, False if violations exist.
+    """
+    return len(find_schema_violations(data, schema, strict_examples=strict_examples)) == 0
