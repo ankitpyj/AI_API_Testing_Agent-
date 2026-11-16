@@ -10,6 +10,19 @@ const parseJsonField = (v) => {
   try { return JSON.parse(v); } catch { return v; }
 };
 
+/** Format an expected-body value for display.
+ *  - null / undefined / empty object → "Not specified in OpenAPI"
+ *  - otherwise → pretty-printed JSON
+ */
+const formatExpectedBody = (v) => {
+  const parsed = parseJsonField(v);
+  if (parsed == null) return null;                // triggers "Not specified in OpenAPI"
+  if (typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).length === 0) {
+    return null;                                   // empty {} → treat as not specified
+  }
+  return JSON.stringify(parsed, null, 2);
+};
+
 const methodColor = { GET: "#10b981", POST: "#3b82f6", PUT: "#f59e0b", DELETE: "#f43f5e", PATCH: "#8b5cf6" };
 const getMethodColor = (m = "") => methodColor[m.toUpperCase()] || "#8892a4";
 
@@ -351,7 +364,12 @@ function TestDetailView({ test, onClose }) {
       <div className="body-diff">
         <div className="diff-block">
           <div className="diff-label">📤 Expected Body</div>
-          <pre className="code-pre">{JSON.stringify(parseJsonField(test.expected_body ?? test.expected?.body), null, 2) || "—"}</pre>
+          {(() => {
+            const formatted = formatExpectedBody(test.expected_body ?? test.expected?.body);
+            return formatted
+              ? <pre className="code-pre">{formatted}</pre>
+              : <pre className="code-pre" style={{ color: "var(--text-muted)", fontStyle: "italic" }}>Not specified in OpenAPI</pre>;
+          })()}
         </div>
         <div className="diff-block">
           <div className="diff-label">📥 Actual Body</div>

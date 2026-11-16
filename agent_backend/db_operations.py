@@ -49,16 +49,22 @@ def save_test_result(run_id, result):
         else expected.get("status_code")
     )
 
-    expected_body = (
-        result.get("expected_schema")
-        if result.get("expected_schema") is not None
-        else (
-            expected.get("response_schema")
-            or expected.get("schema")
-            or expected.get("body")
-            or {}
-        )
-    )
+    # Resolve expected_body from the validated result.
+    # Priority 1: flat "expected_schema" key set by validate_response()
+    # Priority 2: nested "expected.response_schema" key set by generator
+    # None means "no schema defined in OpenAPI" and is stored as JSON null.
+    # We deliberately store None (not {}) so the dashboard can show
+    # "Not specified in OpenAPI" instead of an empty object.
+    if result.get("expected_schema") is not None:
+        expected_body = result.get("expected_schema")
+    elif expected.get("response_schema") is not None:
+        expected_body = expected.get("response_schema")
+    elif expected.get("schema") is not None:
+        expected_body = expected.get("schema")
+    elif expected.get("body") is not None:
+        expected_body = expected.get("body")
+    else:
+        expected_body = None   # No schema defined — stored as JSON null
 
     # ==========================================
     # Actual response

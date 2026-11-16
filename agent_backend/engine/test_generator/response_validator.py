@@ -48,6 +48,7 @@ def validate_response(result):
         result["expected_status"] = expected_status
         result["actual_status"] = actual_status
         result["expected_schema"] = expected_schema
+        result["expected_body"] = expected_schema
         result["actual_body"] = actual_body
         return result
 
@@ -165,6 +166,10 @@ def validate_response(result):
     result["expected_status"] = expected_status
     result["actual_status"] = actual_status
     result["expected_schema"] = expected_schema
+    # Provide expected_body as an alias so the frontend (which reads
+    # expected_body from the DB column name) works for both live runs
+    # and history-loaded runs.  None means "no schema defined in OpenAPI".
+    result["expected_body"] = expected_schema
     result["actual_body"] = actual_body
 
     return result
