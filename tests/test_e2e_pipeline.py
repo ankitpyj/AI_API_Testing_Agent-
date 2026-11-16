@@ -205,3 +205,4 @@ class TestEndToEndPipeline:
             save_test_result(run_id=1, result=val_result)
             val_result["bug_report"] = bug
             save_bug_report(run_id=1, result=val_result)
+
