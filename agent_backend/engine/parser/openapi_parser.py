@@ -47,16 +47,33 @@ def resolve_schema(schema, openapi_data, seen_refs=None):
             # Cyclic or recursive reference encountered — prevent infinite recursion
             return schema
 
-        ref_name = ref_path.split("/")[-1]
+        resolved = None
+        # Try direct JSON pointer traversal first (e.g. #/components/schemas/Pet)
+        if ref_path.startswith("#/"):
+            parts = ref_path[2:].split("/")
+            curr = openapi_data
+            for part in parts:
+                if isinstance(curr, dict) and part in curr:
+                    curr = curr[part]
+                else:
+                    curr = None
+                    break
+            resolved = curr
 
-        resolved = (
-            openapi_data
-            .get("components", {})
-            .get("schemas", {})
-            .get(ref_name)
-        )
         if resolved is None:
-            resolved = openapi_data.get("$defs", {}).get(ref_name, {})
+            ref_name = ref_path.split("/")[-1]
+            resolved = (
+                openapi_data
+                .get("components", {})
+                .get("schemas", {})
+                .get(ref_name)
+            )
+            if resolved is None:
+                resolved = openapi_data.get("$defs", {}).get(ref_name, {})
+            if resolved is None:
+                resolved = openapi_data.get("definitions", {}).get(ref_name, {})
+            if resolved is None:
+                resolved = openapi_data.get("components", {}).get("responses", {}).get(ref_name, {})
 
         new_seen = seen_refs | {ref_path}
         return resolve_schema(resolved, openapi_data, seen_refs=new_seen)
@@ -333,15 +350,20 @@ def extract_endpoints(openapi_data):
             # Responses
             # -------------------------
 
-            for status_code, response_data in operation.get(
+            for status_code, raw_response_data in operation.get(
                 "responses",
                 {}
             ).items():
-                
+                response_data = resolve_schema(raw_response_data, openapi_data) if isinstance(raw_response_data, dict) else {}
+                content = response_data.get("content", {})
+                if not content and "schema" in response_data:
+                    # Swagger 2.0 / OpenAPI direct response schema
+                    content = {"application/json": {"schema": response_data["schema"]}}
+
                 endpoint["responses"].append({
                     "status_code": status_code,
                     "description": response_data.get("description"),
-                    "content": response_data.get("content", {})
+                    "content": content
                 })
 
             endpoints.append(endpoint)

@@ -58,6 +58,7 @@ from bug_report.bug_report_generator import (
 from test_generator.rule_based_generator import (
     generate_all_tests,
     get_expected_success_response,
+    get_expected_response_for_status,
     generate_path_params
 )
 
@@ -423,12 +424,18 @@ def run_all_tests(
                 # Preserve the AI-generated expected status code.
                 test.setdefault("expected", {})
 
-                # Attach the success response schema only when the
-                # expected status represents a successful response.
+                # Attach the expected response schema matching the expected status code
                 expected_status = test["expected"].get("status_code")
 
-                if expected_status is not None and 200 <= expected_status < 300:
-                    test["expected"]["response_schema"] = expected_schema
+                if expected_status is not None:
+                    if 200 <= expected_status < 300:
+                        test["expected"]["response_schema"] = expected_schema
+                    else:
+                        test["expected"]["response_schema"] = get_expected_response_for_status(
+                            endpoint,
+                            openapi_data,
+                            expected_status
+                        )
 
             ai_tests.extend(generated_tests)
 

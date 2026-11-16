@@ -166,20 +166,77 @@ class TestBodyValidationEnabled(unittest.TestCase):
             actual_body={"anything": "here"},
         ))
         self.assertEqual(result["body_check"], "SKIP")
+        # Distinguish no-schema from validation failure: overall status PASS
+        self.assertEqual(result["status"], "PASS")
 
-    def test_body_check_is_skip_for_error_status(self):
-        """We do not validate success schema against 422 responses."""
-        schema = {"type": "object", "properties": {"id": {"type": "integer"}},
-                  "required": ["id"]}
+    def test_422_response_validates_against_422_schema_when_valid(self):
+        """Negative tests with documented error schema must validate the error response."""
+        error_schema = {
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"msg": {"type": "string"}},
+                        "required": ["msg"],
+                    },
+                }
+            },
+            "required": ["detail"],
+        }
         result = validate_response(_make_result(
             expected_status=422,
             actual_status=422,
-            response_schema=schema,          # schema is for expected_status=200
-            actual_body={"detail": "error"},
+            response_schema=error_schema,
+            actual_body={"detail": [{"msg": "Field required"}]},
         ))
-        # Even though schema is provided, it refers to the success response;
-        # for a 422 expected result the body_check must be SKIP.
+        self.assertEqual(result["body_check"], "PASS")
+        self.assertEqual(result["status"], "PASS")
+
+    def test_422_response_fails_when_body_violates_error_schema(self):
+        """
+        When actual status matches expected 422, but the response body
+        does not match the documented 422 schema, the test MUST FAIL.
+        Never mark a test PASS only because status code matched.
+        """
+        error_schema = {
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"msg": {"type": "string"}},
+                        "required": ["msg"],
+                    },
+                }
+            },
+            "required": ["detail"],
+        }
+        # Response body violates schema: detail is string instead of array
+        result = validate_response(_make_result(
+            expected_status=422,
+            actual_status=422,
+            response_schema=error_schema,
+            actual_body={"detail": "string not array"},
+        ))
+        self.assertEqual(result["body_check"], "FAIL")
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["failure_type"], "API_DEFECT")
+        self.assertIn("Response body does not match the expected schema",
+                      result["failure_reason"])
+
+    def test_body_check_is_skip_when_error_status_has_no_schema(self):
+        """When OpenAPI defines no schema for an error status code, body_check is SKIP."""
+        result = validate_response(_make_result(
+            expected_status=422,
+            actual_status=422,
+            response_schema=None,
+            actual_body={"detail": "anything"},
+        ))
         self.assertEqual(result["body_check"], "SKIP")
+        self.assertEqual(result["status"], "PASS")
 
 
 # ===========================================================================
@@ -374,6 +431,56 @@ class TestOpenapiParserResponseSchema(unittest.TestCase):
         result = self.get_expected_success_response(endpoint, openapi_data)
         self.assertIsNotNone(result)
         self.assertEqual(result.get("type"), "object")
+
+    def test_resolves_swagger2_definitions_ref(self):
+        """Supports #/definitions/... from Swagger 2.0 specs."""
+        openapi_data = {
+            "definitions": {
+                "Pet": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                }
+            }
+        }
+        schema = {"$ref": "#/definitions/Pet"}
+        endpoint = self._make_endpoint(schema=schema)
+        result = self.get_expected_success_response(endpoint, openapi_data)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("type"), "object")
+
+    def test_resolves_swagger2_direct_schema_in_response(self):
+        """Supports responses that have schema directly instead of content.application/json."""
+        endpoint = {
+            "method": "GET",
+            "path": "/pets",
+            "responses": [
+                {
+                    "status_code": "200",
+                    "description": "OK",
+                    "schema": {"type": "array", "items": {"type": "string"}},
+                }
+            ],
+        }
+        result = self.get_expected_success_response(endpoint, {})
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("type"), "array")
+
+    def test_get_expected_response_for_status_422(self):
+        """get_expected_response_for_status extracts 422 schema properly."""
+        from agent_backend.engine.test_generator.rule_based_generator import (
+            get_expected_response_for_status,
+        )
+        error_schema = {"type": "object", "properties": {"detail": {"type": "string"}}}
+        endpoint = {
+            "method": "POST",
+            "path": "/login",
+            "responses": [
+                {"status_code": "200", "content": {"application/json": {"schema": {"type": "object"}}}},
+                {"status_code": "422", "content": {"application/json": {"schema": error_schema}}},
+            ],
+        }
+        schema = get_expected_response_for_status(endpoint, {}, 422)
+        self.assertEqual(schema, error_schema)
 
 
 # ===========================================================================

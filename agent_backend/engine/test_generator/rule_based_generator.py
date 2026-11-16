@@ -172,23 +172,23 @@ def get_expected_success_response(
                     {}
                 )
 
-                json_content = content.get(
-                    "application/json",
-                    {}
-                )
+                json_content = content.get("application/json")
+                if not json_content:
+                    for ctype, cdata in content.items():
+                        if "json" in ctype.lower() or ctype == "*/*":
+                            json_content = cdata
+                            break
 
-                schema = json_content.get(
-                    "schema"
-                )
+                if not json_content and "schema" in response:
+                    json_content = {"schema": response["schema"]}
 
-                if schema:
-
-                    resolved_schema = resolve_schema(
-                        schema,
-                        openapi_data
-                    )
-
-                    return resolved_schema
+                if json_content:
+                    schema = json_content.get("schema")
+                    if schema:
+                        return resolve_schema(
+                            schema,
+                            openapi_data
+                        )
 
     return None
 
@@ -216,20 +216,23 @@ def get_expected_response_for_status(
             {}
         )
 
-        json_content = content.get(
-            "application/json",
-            {}
-        )
+        json_content = content.get("application/json")
+        if not json_content:
+            for ctype, cdata in content.items():
+                if "json" in ctype.lower() or ctype == "*/*":
+                    json_content = cdata
+                    break
 
-        schema = json_content.get(
-            "schema"
-        )
+        if not json_content and "schema" in response:
+            json_content = {"schema": response["schema"]}
 
-        if schema:
-            return resolve_schema(
-                schema,
-                openapi_data
-            )
+        if json_content:
+            schema = json_content.get("schema")
+            if schema:
+                return resolve_schema(
+                    schema,
+                    openapi_data
+                )
 
     return None
 

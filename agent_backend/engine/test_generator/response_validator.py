@@ -114,20 +114,13 @@ def validate_response(result):
                 f"but received {actual_status}."
             )
 
-    # ── 3. Validate response schema (success responses only) ─────────────
+    # ── 3. Validate response schema ──────────────────────────────────────
     if expected_schema is None:
         body_result = "SKIP"
 
-    elif (
-        not isinstance(expected_status, int)
-        or not 200 <= expected_status < 300
-    ):
-        # Error-response schema should not be checked against success schema.
-        body_result = "SKIP"
-
     elif status_result == "FAIL":
-        # Status mismatch — do not validate a success schema against
-        # whatever the API actually returned.
+        # Status mismatch — do not validate a schema against
+        # whatever unexpected response the API actually returned.
         body_result = "SKIP"
 
     elif validate_schema(actual_body, expected_schema):

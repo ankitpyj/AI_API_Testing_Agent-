@@ -365,7 +365,8 @@ function TestDetailView({ test, onClose }) {
         <div className="diff-block">
           <div className="diff-label">📤 Expected Body</div>
           {(() => {
-            const formatted = formatExpectedBody(test.expected_body ?? test.expected?.body);
+            const expVal = test.expected_body ?? test.expected_schema ?? test.expected?.response_schema ?? test.expected?.body;
+            const formatted = formatExpectedBody(expVal);
             return formatted
               ? <pre className="code-pre">{formatted}</pre>
               : <pre className="code-pre" style={{ color: "var(--text-muted)", fontStyle: "italic" }}>Not specified in OpenAPI</pre>;
@@ -493,16 +494,18 @@ function BugsPage({ testData }) {
                       {isSelected && (() => {
                         const expSt  = test.expected_status ?? test.expected?.status_code;
                         const actSt  = test.actual_status   ?? test.actual?.status_code;
-                        const statusPass = expSt != null && actSt != null && expSt === actSt;
+                        const statusPass = test.status_check ? test.status_check === "PASS" : (expSt != null && actSt != null && expSt === actSt);
+                        const bodyCheck = test.body_check;
                         const bodyFail   = test.failure_reason
                           ? /body|content|response|field|key|value|mismatch|schema/i.test(test.failure_reason)
                           : false;
-                        const bodyPass   = !bodyFail;
+                        const bodyPass   = bodyCheck ? bodyCheck === "PASS" : !bodyFail;
+                        const bodySkip   = bodyCheck === "SKIP";
 
                         const checks = [
-                          { label: "Status Code Check",   pass: statusPass },
-                          { label: "Response Body Check", pass: bodyPass   },
-                          { label: "Overall Test",        pass: false       },
+                          { label: "Status Code Check",   pass: statusPass, badge: statusPass ? "✅ PASS" : "❌ FAIL" },
+                          { label: "Response Body Check", pass: bodyPass, badge: bodySkip ? "— SKIP (No schema)" : (bodyPass ? "✅ PASS" : "❌ FAIL") },
+                          { label: "Overall Test",        pass: false, badge: "❌ FAIL" },
                         ];
 
                         return (
@@ -511,11 +514,11 @@ function BugsPage({ testData }) {
                             <div className="bce-section">
                               <div className="bce-label">Checks</div>
                               <div className="bc-checks">
-                                {checks.map(({ label, pass }) => (
+                                {checks.map(({ label, pass, badge }) => (
                                   <div key={label} className="bc-check-row">
                                     <span className="bc-check-label">{label}</span>
                                     <span className={`bc-check-badge ${pass ? "pass" : "fail"}`}>
-                                      {pass ? "✅ PASS" : "❌ FAIL"}
+                                      {badge}
                                     </span>
                                   </div>
                                 ))}
@@ -740,7 +743,7 @@ export default function App() {
           ...test,
           expected_status: test.expected_status ?? test.expected?.status_code ?? null,
           actual_status:   test.actual_status   ?? test.actual?.status_code   ?? null,
-          expected_body:   test.expected_body   ?? test.expected?.body         ?? null,
+          expected_body:   test.expected_body   ?? test.expected_schema       ?? test.expected?.response_schema ?? test.expected?.body ?? null,
           actual_body:     test.actual_body     ?? test.actual?.body           ?? null,
         };
         const bug = bData.data.find(b => b.test_id === test.test_id);
