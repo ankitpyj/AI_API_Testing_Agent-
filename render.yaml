@@ -1,0 +1,116 @@
+# ==============================================================================
+# Render Blueprint Configuration (render.yaml)
+# AI API Testing Agent — Multi-User SaaS Platform
+# ==============================================================================
+# This blueprint defines the deployment architecture on Render.
+# Supports both:
+#   Option A: Unified Web + Worker in a single service (ENABLE_BACKGROUND_WORKER=true)
+#   Option B: Decoupled Web Service + Dedicated Background Worker Service
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. FastAPI Backend Web Service
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: ai-api-testing-agent
+    runtime: python
+    region: ohio
+    plan: starter
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r agent_backend/requirements.txt
+    startCommand: uvicorn agent_backend.app:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health/ready
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ENABLE_BACKGROUND_WORKER
+        value: "true"  # Option A: enables embedded background worker loop inside lifespan
+      - key: MAX_CONCURRENT_WORKERS
+        value: "3"
+      - key: WORKER_POLL_INTERVAL
+        value: "1.0"
+      - key: FRONTEND_URL
+        value: https://ai-api-testing-dashboard.onrender.com
+      - key: GEMINI_MODEL
+        value: gemini-flash-lite-latest
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: "3306"
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_SSL_CA
+        value: agent_backend/ca.pem
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"
+      - key: PROJECT_SECRET_ENCRYPTION_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+
+  # ----------------------------------------------------------------------------
+  # 2. React Vite Frontend Static Site
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: ai-api-testing-dashboard
+    runtime: static
+    region: ohio
+    plan: free
+    branch: main
+    rootDir: dashboard
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        value: https://ai-api-testing-agent.onrender.com
+      - key: VITE_API_BASE_URL
+        value: https://ai-api-testing-agent.onrender.com
+
+  # ----------------------------------------------------------------------------
+  # 3. Optional Dedicated Worker Service (Option B Architecture)
+  # Uncomment below for high-volume decoupled production environments
+  # ----------------------------------------------------------------------------
+  # - type: worker
+  #   name: ai-api-testing-worker
+  #   runtime: python
+  #   region: ohio
+  #   plan: starter
+  #   branch: main
+  #   buildCommand: pip install --upgrade pip && pip install -r agent_backend/requirements.txt
+  #   startCommand: python -m agent_backend.worker
+  #   envVars:
+  #     - key: PYTHON_VERSION
+  #       value: 3.11.9
+  #     - key: MAX_CONCURRENT_WORKERS
+  #       value: "5"
+  #     - key: WORKER_POLL_INTERVAL
+  #       value: "1.0"
+  #     - key: DB_HOST
+  #       sync: false
+  #     - key: DB_PORT
+  #       value: "3306"
+  #     - key: DB_USER
+  #       sync: false
+  #     - key: DB_PASSWORD
+  #       sync: false
+  #     - key: DB_NAME
+  #       sync: false
+  #     - key: DB_SSL_CA
+  #       value: agent_backend/ca.pem
+  #     - key: PROJECT_SECRET_ENCRYPTION_KEY
+  #       sync: false
+  #     - key: GEMINI_API_KEY
+  #       sync: false

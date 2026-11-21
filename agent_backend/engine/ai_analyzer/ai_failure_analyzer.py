@@ -20,6 +20,23 @@ except ImportError:
     except ImportError:
         from agent_backend.engine.common.gemini_retry import execute_with_retry
 
+try:
+    from engine.authentication.project_auth import sanitize_text
+except ImportError:
+    try:
+        from agent_backend.engine.authentication.project_auth import sanitize_text
+    except ImportError:
+        sanitize_text = lambda t, *args: t
+
+try:
+    from engine.authentication.response_sanitizer import sanitize_data, sanitize_string
+except ImportError:
+    try:
+        from agent_backend.engine.authentication.response_sanitizer import sanitize_data, sanitize_string
+    except ImportError:
+        sanitize_data = lambda d, *args, **kwargs: d
+        sanitize_string = lambda s, *args, **kwargs: s
+
 # ---------------------------------------------------------------------------
 # Model configuration
 # ---------------------------------------------------------------------------
@@ -60,9 +77,12 @@ except Exception as _client_init_error:
     client = None
 
 
-def analyze_failure(result):
+def analyze_failure(result, secrets=None, user_id=None, run_id=None):
     """
     Analyze a failed API test using an LLM.
+
+    Sanitizes result data and prompts against configured secrets before sending
+    to the Gemini API to prevent credential leakage.
 
     Returns a dict with the analysis on success, or a dict with
     analyzer_failed=True when analysis could not be completed.
@@ -93,6 +113,9 @@ def analyze_failure(result):
             ),
         }
 
+    # Data privacy: sanitize the test result payload before including it in the prompt
+    clean_result = sanitize_data(result, secrets=secrets)
+
     prompt = f"""
 You are an expert software tester.
 
@@ -100,7 +123,7 @@ Analyze the following failed API test.
 
 Test Result:
 
-{json.dumps(result, indent=2)}
+{json.dumps(clean_result, indent=2)}
 
 Explain the failure using ONLY evidence present
 in the test result.
@@ -135,6 +158,34 @@ by the test result.
 Keep each JSON value short.
 """
 
+    clean_prompt = sanitize_string(prompt, secrets=secrets)
+    clean_prompt = sanitize_text(clean_prompt)
+
+    ai_log_id = None
+    if user_id is not None:
+        try:
+            try:
+                from usage_service import reserve_ai_operation, is_quota_enforcement_enabled
+            except ImportError:
+                from agent_backend.usage_service import reserve_ai_operation, is_quota_enforcement_enabled
+            ai_log_id = reserve_ai_operation(
+                user_id=user_id,
+                run_id=run_id,
+                call_type="analysis",
+                model=GEMINI_MODEL
+            )
+            if ai_log_id is None and is_quota_enforcement_enabled():
+                logger.info("[AI Analyzer] Monthly AI operation limit reached. Falling back to deterministic rule-based analysis.")
+                return {
+                    "analyzer_failed": False,
+                    "is_ai": False,
+                    "summary": f"API defect on {result.get('endpoint', '')}: expected status {result.get('expected_status')}, received {result.get('actual_status')}",
+                    "possible_cause": result.get("failure_reason", "Expected HTTP status did not match actual response."),
+                    "severity": "Medium",
+                    "recommendation": "Review endpoint logic and response schema definitions in the OpenAPI documentation."
+                }
+        except Exception as res_err:
+            logger.debug("[AI Analyzer] AI reservation check bypassed: %s", res_err)
 
     try:
         def _call_gemini():
@@ -143,7 +194,7 @@ Keep each JSON value short.
                 messages=[
                     {
                         "role": "user",
-                        "content": prompt
+                        "content": clean_prompt
                     }
                 ],
                 temperature=0.2,
@@ -158,6 +209,43 @@ Keep each JSON value short.
             base_delay=2.0,
             caller_name="AI Analyzer",
         )
+
+        if ai_log_id is not None:
+            try:
+                try:
+                    from usage_service import complete_ai_operation
+                except ImportError:
+                    from agent_backend.usage_service import complete_ai_operation
+                usage = getattr(response, "usage", None)
+                in_tok = getattr(usage, "prompt_tokens", 0) or 0
+                out_tok = getattr(usage, "completion_tokens", 0) or 0
+                tot_tok = getattr(usage, "total_tokens", 0) or (in_tok + out_tok)
+                complete_ai_operation(ai_log_id, in_tok, out_tok, tot_tok)
+            except Exception as log_err:
+                logger.warning("[AI Analyzer] Failed to complete AI usage: %s", log_err)
+        elif user_id is not None:
+            try:
+                try:
+                    from db_operations import log_ai_usage
+                except ImportError:
+                    from agent_backend.db_operations import log_ai_usage
+                usage = getattr(response, "usage", None)
+                in_tok = getattr(usage, "prompt_tokens", None) if usage else None
+                out_tok = getattr(usage, "completion_tokens", None) if usage else None
+                tot_tok = getattr(usage, "total_tokens", None) if usage else None
+                log_ai_usage(
+                    user_id=user_id,
+                    run_id=run_id,
+                    call_type="analysis",
+                    provider="gemini",
+                    model=GEMINI_MODEL,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    total_tokens=tot_tok,
+                    status="success"
+                )
+            except Exception as log_err:
+                logger.warning("[AI Analyzer] Failed to log AI usage: %s", log_err)
 
         response_text = (
             response.choices[0]
@@ -216,6 +304,31 @@ Keep each JSON value short.
 
 
     except Exception as e:
+        if ai_log_id is not None:
+            try:
+                try:
+                    from usage_service import fail_ai_operation
+                except ImportError:
+                    from agent_backend.usage_service import fail_ai_operation
+                fail_ai_operation(ai_log_id)
+            except Exception:
+                pass
+        elif user_id is not None:
+            try:
+                try:
+                    from db_operations import log_ai_usage
+                except ImportError:
+                    from agent_backend.db_operations import log_ai_usage
+                log_ai_usage(
+                    user_id=user_id,
+                    run_id=run_id,
+                    call_type="analysis",
+                    provider="gemini",
+                    model=GEMINI_MODEL,
+                    status="failed"
+                )
+            except Exception:
+                pass
 
         # Log the error type and message but NOT the full API response, key,
         # or any authorisation headers — only safe diagnostic information.

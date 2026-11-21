@@ -1,11 +1,18 @@
-/* index.css — global resets for the dark dashboard */
-*, *::before, *::after { box-sizing: border-box; }
+/* index.css — global resets and HTML/body layout */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
 
 html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: #080b14;
+  font-family: var(--font, 'Inter', system-ui, -apple-system, sans-serif);
+  background-color: var(--bg-app, #090D16);
+  color: var(--text-primary, #F8FAFC);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 #root {
@@ -15,5 +22,19 @@ html, body {
   text-align: left;
   border: none;
   min-height: 100vh;
-  display: block;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Accessibility: screen reader utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }

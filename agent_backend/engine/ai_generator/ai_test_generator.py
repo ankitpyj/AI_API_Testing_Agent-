@@ -219,7 +219,7 @@ def _debug_log(*args, **kwargs):
         print("[DIAGNOSTIC]", *args, **kwargs)
 
 
-def generate_ai_tests(api_info):
+def generate_ai_tests(api_info, user_id=None, run_id=None):
     """
     Generate AI-powered edge-case tests for one endpoint.
 
@@ -341,6 +341,25 @@ code for each test based on the decision rules. The tests array must contain exa
 Do not include markdown, explanations, or any text outside the JSON object.
 """
 
+    ai_log_id = None
+    if user_id is not None:
+        try:
+            try:
+                from usage_service import reserve_ai_operation, is_quota_enforcement_enabled
+            except ImportError:
+                from agent_backend.usage_service import reserve_ai_operation, is_quota_enforcement_enabled
+            ai_log_id = reserve_ai_operation(
+                user_id=user_id,
+                run_id=run_id,
+                call_type="generation",
+                model=GEMINI_MODEL
+            )
+            if ai_log_id is None and is_quota_enforcement_enabled():
+                print("[AI Generator] Monthly AI operation limit reached. Skipping AI test generation.")
+                return []
+        except Exception as res_err:
+            logger.debug("[AI Generator] AI reservation check bypassed: %s", res_err)
+
     try:
         def _call_gemini():
             print(
@@ -363,6 +382,43 @@ Do not include markdown, explanations, or any text outside the JSON object.
             base_delay=2.0,
             caller_name="AI Generator",
         )
+
+        if ai_log_id is not None:
+            try:
+                try:
+                    from usage_service import complete_ai_operation
+                except ImportError:
+                    from agent_backend.usage_service import complete_ai_operation
+                usage = getattr(response, "usage", None)
+                in_tok = getattr(usage, "prompt_tokens", 0) or 0
+                out_tok = getattr(usage, "completion_tokens", 0) or 0
+                tot_tok = getattr(usage, "total_tokens", 0) or (in_tok + out_tok)
+                complete_ai_operation(ai_log_id, in_tok, out_tok, tot_tok)
+            except Exception as log_err:
+                logger.warning("[AI Generator] Failed to complete AI usage: %s", log_err)
+        elif user_id is not None:
+            try:
+                try:
+                    from db_operations import log_ai_usage
+                except ImportError:
+                    from agent_backend.db_operations import log_ai_usage
+                usage = getattr(response, "usage", None)
+                in_tok = getattr(usage, "prompt_tokens", None) if usage else None
+                out_tok = getattr(usage, "completion_tokens", None) if usage else None
+                tot_tok = getattr(usage, "total_tokens", None) if usage else None
+                log_ai_usage(
+                    user_id=user_id,
+                    run_id=run_id,
+                    call_type="generation",
+                    provider="gemini",
+                    model=GEMINI_MODEL,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    total_tokens=tot_tok,
+                    status="success"
+                )
+            except Exception as log_err:
+                logger.warning("[AI Generator] Failed to log AI usage: %s", log_err)
 
         message = response.choices[0].message
         response_text = (message.content or "").strip()
@@ -612,5 +668,30 @@ Do not include markdown, explanations, or any text outside the JSON object.
         return ai_tests
 
     except Exception as e:
+        if ai_log_id is not None:
+            try:
+                try:
+                    from usage_service import fail_ai_operation
+                except ImportError:
+                    from agent_backend.usage_service import fail_ai_operation
+                fail_ai_operation(ai_log_id)
+            except Exception:
+                pass
+        elif user_id is not None:
+            try:
+                try:
+                    from db_operations import log_ai_usage
+                except ImportError:
+                    from agent_backend.db_operations import log_ai_usage
+                log_ai_usage(
+                    user_id=user_id,
+                    run_id=run_id,
+                    call_type="generation",
+                    provider="gemini",
+                    model=GEMINI_MODEL,
+                    status="failed"
+                )
+            except Exception:
+                pass
         print(f"[AI Generator] Generation failed: {e}")
         return []

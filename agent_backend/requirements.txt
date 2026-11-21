@@ -5,3 +5,7 @@ mysql-connector-python
 requests
 openai
 email-validator
+bcrypt
+pyjwt
+cryptography>=41.0.0
+

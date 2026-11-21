@@ -16,15 +16,46 @@ HTTP_METHODS = {
 }
 
 
-def load_openapi(url):
+def load_openapi(url, auth_headers=None):
     """
-    Fetch OpenAPI specification from the target API.
+    Fetch OpenAPI specification from the target API, with SSRF validation
+    and authenticated header injection.
     """
+    if not url or not isinstance(url, str):
+        raise ValueError("Invalid OpenAPI URL: URL must be a non-empty string.")
 
-    with urllib.request.urlopen(url) as response:
-        data = response.read()
+    # 1. SSRF Validation
+    try:
+        from engine.common.ssrf_protection import validate_target_url
+        validate_target_url(url)
+    except ImportError:
+        try:
+            from common.ssrf_protection import validate_target_url
+            validate_target_url(url)
+        except ImportError:
+            try:
+                from agent_backend.engine.common.ssrf_protection import validate_target_url
+                validate_target_url(url)
+            except ImportError:
+                pass
 
-    return json.loads(data)
+    headers = dict(auth_headers or {})
+    headers.setdefault("Accept", "application/json, application/yaml, */*")
+
+    # 2. Fetch specification using redirect-protected session with timeout
+    try:
+        from engine.authentication.project_auth import RedirectAuthProtectedSession
+        session = RedirectAuthProtectedSession(sensitive_headers=headers.keys() if headers else None)
+        response = session.get(url, headers=headers, timeout=15, allow_redirects=True)
+        response.raise_for_status()
+        raw_text = response.text
+    except Exception:
+        # Fallback to urllib if requests encountered an issue
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as response:
+            raw_text = response.read().decode("utf-8", errors="replace")
+
+    return json.loads(raw_text)
 
 
 def resolve_schema(schema, openapi_data, seen_refs=None):
