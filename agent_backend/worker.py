@@ -52,7 +52,22 @@ except ImportError:
     from agent_backend.engine.authentication.response_sanitizer import sanitize_error_message
 
 
-WORKER_ID = f"worker-{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:6]}"
+def generate_worker_id(hostname: Optional[str] = None, pid: Optional[int] = None) -> str:
+    """
+    Generate a bounded, collision-resistant worker identifier <= 64 chars.
+    Preserves full 32-character UUID4 hex entropy while bounding the hostname slug to 12 chars.
+    Format: w-{hostname_slug}-{pid}-{uuid4_hex}
+    Max length: 2 + 12 + 1 + 7 + 1 + 32 = 55 chars (strictly <= 64 chars).
+    """
+    raw_host = hostname if hostname is not None else socket.gethostname()
+    host_slug = raw_host.split(".")[0][:12]
+    proc_pid = pid if pid is not None else os.getpid()
+    wid = f"w-{host_slug}-{proc_pid}-{uuid4().hex}"
+    assert len(wid) <= 64, f"Worker ID exceeds 64 characters: {len(wid)}"
+    return wid
+
+
+WORKER_ID = generate_worker_id()
 MAX_CONCURRENT_WORKERS = int(os.getenv("MAX_CONCURRENT_WORKERS", "3"))
 POLL_INTERVAL = float(os.getenv("WORKER_POLL_INTERVAL", "1.0"))
 
